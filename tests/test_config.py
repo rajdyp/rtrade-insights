@@ -1,0 +1,91 @@
+from stock_calculator.config import AppConfig, load_config
+
+
+def test_load_config_uses_defaults_when_file_is_missing(tmp_path):
+    config = load_config(tmp_path / "missing.toml")
+
+    assert config == AppConfig(portfolio_amount=20_000.0, sizing_portfolio_amount=20_000.0, risk_percent=0.5)
+
+
+def test_load_config_reads_valid_defaults(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[defaults]
+portfolio_amount = 50000.0
+sizing_portfolio_amount = 40000.0
+risk_percent = 1.25
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.portfolio_amount == 50_000.0
+    assert config.sizing_portfolio_amount == 40_000.0
+    assert config.risk_percent == 1.25
+
+
+def test_load_config_defaults_sizing_portfolio_to_baseline_portfolio(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[defaults]
+portfolio_amount = 50000.0
+risk_percent = 1.25
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.portfolio_amount == 50_000.0
+    assert config.sizing_portfolio_amount == 50_000.0
+    assert config.risk_percent == 1.25
+
+
+def test_load_config_falls_back_per_invalid_field(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[defaults]
+portfolio_amount = -1
+sizing_portfolio_amount = -2
+risk_percent = 0.75
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.portfolio_amount == 20_000.0
+    assert config.sizing_portfolio_amount == 20_000.0
+    assert config.risk_percent == 0.75
+
+
+def test_load_config_falls_back_invalid_sizing_portfolio_to_baseline_portfolio(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[defaults]
+portfolio_amount = 50000.0
+sizing_portfolio_amount = -2
+risk_percent = 0.75
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.portfolio_amount == 50_000.0
+    assert config.sizing_portfolio_amount == 50_000.0
+    assert config.risk_percent == 0.75
+
+
+def test_load_config_falls_back_for_invalid_toml(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[defaults", encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config == AppConfig(portfolio_amount=20_000.0, sizing_portfolio_amount=20_000.0, risk_percent=0.5)

@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from typing import Any
+
+import pandas as pd
+
+
+INPUT_COLUMNS = [
+    "symbol",
+    "buy_date",
+    "share_price",
+    "stop_price",
+    "portfolio_amount",
+    "risk_percent",
+]
+
+OUTPUT_COLUMNS = [
+    *INPUT_COLUMNS,
+    "stop_loss_percent",
+    "risk_amount",
+    "number_of_shares",
+    "hold_count",
+    "sell_lot",
+    "position_size",
+    "validation_error",
+]
+
+PUBLIC_OUTPUT_COLUMNS = [
+    "symbol",
+    "buy_date",
+    "share_price",
+    "stop_price",
+    "stop_loss_percent",
+    "number_of_shares",
+    "sell_lot",
+    "hold_count",
+    "position_size",
+    "risk_percent",
+    "risk_amount",
+    "portfolio_amount",
+]
+
+
+@dataclass(frozen=True)
+class PositionCalculation:
+    stop_loss_percent: float | None
+    risk_amount: float | None
+    number_of_shares: int | None
+    hold_count: int | None
+    sell_lot: int | None
+    position_size: float | None
+    validation_error: str
+
+
+def empty_positions(rows: int = 8) -> pd.DataFrame:
+    today = date.today().isoformat()
+    return pd.DataFrame(
+        [
+            {
+                "symbol": "",
+                "buy_date": today,
+                "share_price": None,
+                "stop_price": None,
+                "portfolio_amount": 20_000.0,
+                "risk_percent": 0.50,
+            }
+            for _ in range(rows)
+        ],
+        columns=INPUT_COLUMNS,
+    )
+
+
+def normalize_input_frame(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    for column in INPUT_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
+
+    normalized = normalized[INPUT_COLUMNS]
+    normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
+    normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
+
+    for column in ["share_price", "stop_price", "portfolio_amount", "risk_percent"]:
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+
+    return normalized
+
+
+def committed_positions(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = normalize_input_frame(df)
+    return normalized[normalized["symbol"] != ""].reset_index(drop=True)
+
+
+def delete_positions_by_index(df: pd.DataFrame, row_indexes: list[int]) -> pd.DataFrame:
+    positions = committed_positions(df)
+    if not row_indexes:
+        return positions
+
+    delete_indexes = {int(row_index) for row_index in row_indexes}
+    keep_mask = ~positions.index.isin(delete_indexes)
+    return positions.loc[keep_mask].reset_index(drop=True)
+
+
+def draft_position(
+    *,
+    symbol: str,
+    buy_date: Any,
+    share_price: float | None,
+    stop_price: float | None,
+    portfolio_amount: float | None,
+    risk_percent: float | None,
+) -> pd.DataFrame:
+    return normalize_input_frame(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "buy_date": buy_date,
+                    "share_price": share_price,
+                    "stop_price": stop_price,
+                    "portfolio_amount": portfolio_amount,
+                    "risk_percent": risk_percent,
+                }
+            ]
+        )
+    )
+
+
+def append_committed_position(positions: pd.DataFrame, draft: pd.DataFrame) -> pd.DataFrame:
+    draft_row = committed_positions(draft)
+    if draft_row.empty:
+        return committed_positions(positions)
+
+    calculated = calculate_positions(draft_row)
+    validation_error = str(calculated.iloc[0]["validation_error"] or "")
+    if validation_error:
+        return committed_positions(positions)
+
+    return committed_positions(pd.concat([draft_row, committed_positions(positions)], ignore_index=True))
+
+
+def calculate_position(row: pd.Series, *, as_of: date | None = None) -> PositionCalculation:
+    symbol = str(row.get("symbol") or "").strip()
+    share_price = _to_float(row.get("share_price"))
+    stop_price = _to_float(row.get("stop_price"))
+    portfolio_amount = _to_float(row.get("portfolio_amount"))
+    risk_percent = _to_float(row.get("risk_percent"))
+    hold_count = weekday_hold_count(row.get("buy_date"), as_of=as_of)
+
+    if not symbol:
+        return PositionCalculation(None, None, None, None, None, None, "")
+    if share_price is None or share_price <= 0:
+        return PositionCalculation(None, None, None, hold_count, None, None, "Share price must be greater than 0.")
+    if stop_price is None or stop_price <= 0:
+        return PositionCalculation(None, None, None, hold_count, None, None, "Stop price must be greater than 0.")
+    if stop_price >= share_price:
+        return PositionCalculation(None, None, None, hold_count, None, None, "Stop price must be below share price.")
+    if portfolio_amount is None or portfolio_amount <= 0:
+        return PositionCalculation(None, None, None, hold_count, None, None, "Portfolio amount must be greater than 0.")
+    if risk_percent is None or risk_percent <= 0:
+        return PositionCalculation(None, None, None, hold_count, None, None, "Risk percent must be greater than 0.")
+
+    risk_per_share = share_price - stop_price
+    risk_amount = portfolio_amount * (risk_percent / 100)
+    number_of_shares = int(risk_amount // risk_per_share)
+
+    if number_of_shares <= 0:
+        return PositionCalculation(
+            round((risk_per_share / share_price) * 100, 2),
+            round(risk_amount, 2),
+            0,
+            hold_count,
+            0,
+            0.0,
+            "Risk amount is too small to buy one share at this stop distance.",
+        )
+
+    position_size = number_of_shares * share_price
+
+    return PositionCalculation(
+        stop_loss_percent=round((risk_per_share / share_price) * 100, 2),
+        risk_amount=round(risk_amount, 2),
+        number_of_shares=number_of_shares,
+        hold_count=hold_count,
+        sell_lot=number_of_shares // 3,
+        position_size=round(position_size, 2),
+        validation_error="",
+    )
+
+
+def calculate_positions(df: pd.DataFrame, *, as_of: date | None = None) -> pd.DataFrame:
+    normalized = normalize_input_frame(df)
+    calculations = normalized.apply(lambda row: calculate_position(row, as_of=as_of), axis=1)
+
+    result = normalized.copy()
+    for field in PositionCalculation.__dataclass_fields__:
+        result[field] = [getattr(calculation, field) for calculation in calculations]
+
+    return result[OUTPUT_COLUMNS]
+
+
+def weekday_hold_count(buy_date: Any, *, as_of: date | None = None) -> int | None:
+    parsed_buy_date = _to_date(buy_date)
+    if parsed_buy_date is None:
+        return None
+
+    end_date = as_of or date.today()
+    if parsed_buy_date >= end_date:
+        return 0
+
+    days = pd.date_range(parsed_buy_date, end_date, inclusive="right")
+    return int(sum(day.weekday() < 5 for day in days))
+
+
+def format_currency(value: Any) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"${number:,.2f}"
+
+
+def format_percent(value: Any) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"{number:.2f}%"
+
+
+def _to_float(value: Any) -> float | None:
+    if pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_date(value: Any) -> date | None:
+    if pd.isna(value):
+        return None
+    if isinstance(value, date):
+        return value
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()

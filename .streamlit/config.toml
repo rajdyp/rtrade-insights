@@ -1,0 +1,30 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+
+[theme]
+base = "light"
+
+[theme.light]
+backgroundColor = "#f5f3ee"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1a1608"
+primaryColor = "#c47d00"
+borderColor = "#dbd5c8"
+dataframeBorderColor = "#cec4b4"
+dataframeHeaderBackgroundColor = "#ebe4d7"
+grayColor = "#7a7060"
+greenColor = "#16a34a"
+redColor = "#dc2626"
+
+[theme.dark]
+backgroundColor = "#07090c"
+secondaryBackgroundColor = "#0d1118"
+textColor = "#ccd4e4"
+primaryColor = "#e8960a"
+borderColor = "#1c2535"
+grayColor = "#4a5870"
+greenColor = "#2dcc70"
+redColor = "#e84040"

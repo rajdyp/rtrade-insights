@@ -1,0 +1,210 @@
+import pandas as pd
+
+from stock_calculator.calculations import INPUT_COLUMNS
+from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, calculate_trade_metrics, derive_fifo_trades
+from stock_calculator.storage import (
+    append_robinhood_transactions,
+    generate_planned_stops_from_transactions,
+    load_planned_stops,
+    load_positions,
+    load_robinhood_transactions,
+    save_planned_stops,
+    save_positions,
+    save_robinhood_transactions,
+    upsert_planned_stop,
+)
+
+
+def test_save_positions_filters_blank_rows(tmp_path):
+    path = tmp_path / "positions.csv"
+    save_positions(
+        pd.DataFrame(
+            [
+                {"symbol": "", "share_price": 100},
+                {
+                    "symbol": "KEEP",
+                    "buy_date": "2026-04-24",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                },
+            ]
+        ),
+        path,
+    )
+
+    loaded = pd.read_csv(path)
+
+    assert loaded["symbol"].tolist() == ["KEEP"]
+    assert loaded.columns.tolist() == INPUT_COLUMNS
+
+
+def test_load_positions_returns_empty_frame_for_missing_file(tmp_path):
+    loaded = load_positions(tmp_path / "missing.csv")
+
+    assert loaded.empty
+    assert "symbol" in loaded.columns
+
+
+def test_load_robinhood_transactions_returns_empty_frame_for_missing_file(tmp_path):
+    loaded = load_robinhood_transactions(tmp_path / "missing.csv")
+
+    assert loaded.empty
+    assert loaded.columns.tolist() == TRANSACTION_COLUMNS
+
+
+def test_load_planned_stops_returns_empty_frame_for_missing_file(tmp_path):
+    loaded = load_planned_stops(tmp_path / "missing.csv")
+
+    assert loaded.empty
+    assert loaded.columns.tolist() == PLANNED_STOP_COLUMNS
+
+
+def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
+    path = tmp_path / "planned_stops.csv"
+    save_planned_stops(
+        pd.DataFrame([{"symbol": "aapl", "buy_date": "2026-04-01", "quantity": "2", "planned_stop": "190.50"}]),
+        path,
+    )
+
+    loaded = load_planned_stops(path)
+
+    assert loaded.columns.tolist() == PLANNED_STOP_COLUMNS
+    assert loaded["symbol"].tolist() == ["AAPL"]
+    assert loaded["quantity"].tolist() == [2.0]
+    assert loaded["planned_stop"].tolist() == [190.50]
+
+
+def test_save_and_load_robinhood_transactions_preserves_cleaned_columns(tmp_path):
+    path = tmp_path / "robinhood_transactions.csv"
+    save_robinhood_transactions(_transactions([{"symbol": "aapl", "quantity": "2", "price": "190.50"}]), path)
+
+    loaded = load_robinhood_transactions(path)
+
+    assert loaded.columns.tolist() == TRANSACTION_COLUMNS
+    assert loaded["symbol"].tolist() == ["AAPL"]
+    assert loaded["quantity"].tolist() == [2.0]
+    assert loaded["price"].tolist() == [190.50]
+
+
+def test_append_robinhood_transactions_adds_unseen_rows_and_skips_duplicates():
+    existing = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 1, "price": 100},
+        ]
+    )
+    incoming = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "aapl", "trans_code": "Buy", "quantity": 1, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "AAPL", "trans_code": "Sell", "quantity": 1, "price": 110},
+        ]
+    )
+
+    result, added_count = append_robinhood_transactions(existing, incoming)
+
+    assert added_count == 1
+    assert result["trans_code"].tolist() == ["Buy", "Sell"]
+
+
+def test_reuploading_same_robinhood_transactions_does_not_double_count_metrics():
+    first_upload = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 1, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "AAPL", "trans_code": "Sell", "quantity": 1, "price": 110},
+        ]
+    )
+    second_upload = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "aapl", "trans_code": "Buy", "quantity": 1, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "AAPL", "trans_code": "Sell", "quantity": 1, "price": 110},
+            {"activity_date": "2026-04-03", "symbol": "MSFT", "trans_code": "Buy", "quantity": 2, "price": 50},
+            {"activity_date": "2026-04-04", "symbol": "MSFT", "trans_code": "Sell", "quantity": 2, "price": 55},
+        ]
+    )
+
+    persisted, first_count = append_robinhood_transactions(pd.DataFrame(columns=TRANSACTION_COLUMNS), first_upload)
+    persisted, second_count = append_robinhood_transactions(persisted, second_upload)
+    metrics = calculate_trade_metrics(derive_fifo_trades(persisted).closed_trades)
+
+    assert first_count == 2
+    assert second_count == 2
+    assert metrics["trade_count"] == 2
+    assert metrics["expectancy"] == 10.0
+
+
+def test_generate_planned_stops_from_transactions_uses_buy_rows_with_blank_stops():
+    transactions = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 1, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "AAPL", "trans_code": "Sell", "quantity": 1, "price": 110},
+            {"activity_date": "2026-04-03", "symbol": "MSFT", "trans_code": "Buy", "quantity": 2, "price": 50},
+        ]
+    )
+
+    result = generate_planned_stops_from_transactions(transactions)
+
+    assert result.columns.tolist() == PLANNED_STOP_COLUMNS
+    assert result[["symbol", "buy_date", "quantity"]].to_dict("records") == [
+        {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 1.0},
+        {"symbol": "MSFT", "buy_date": "2026-04-03", "quantity": 2.0},
+    ]
+    assert result["planned_stop"].isna().all()
+
+
+def test_upsert_planned_stop_records_calculated_entry_stop():
+    planned_stops = pd.DataFrame(columns=PLANNED_STOP_COLUMNS)
+    calculated_position = pd.Series(
+        {
+            "symbol": "aapl",
+            "buy_date": "2026-04-01",
+            "number_of_shares": 2,
+            "stop_price": 190.5,
+        }
+    )
+
+    result = upsert_planned_stop(planned_stops, calculated_position)
+
+    assert result.to_dict("records") == [
+        {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.5}
+    ]
+
+
+def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
+    transactions = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 1, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "AAPL", "trans_code": "Sell", "quantity": 1, "price": 110},
+        ]
+    )
+    planned_stops = pd.DataFrame(
+        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 1, "planned_stop": 95}],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned_stops)
+
+    assert result.closed_trades.iloc[0]["planned_stop"] == 95
+    assert result.missing_planned_stops == 0
+
+
+def _transactions(overrides: list[dict]) -> pd.DataFrame:
+    rows = []
+    for override in overrides:
+        row = {
+            "activity_date": "2026-04-01",
+            "process_date": "2026-04-01",
+            "settle_date": "2026-04-02",
+            "symbol": "AAPL",
+            "description": "Apple",
+            "trans_code": "Buy",
+            "quantity": 1,
+            "price": 100,
+            "amount": -100,
+        }
+        row.update(override)
+        if "amount" not in override:
+            multiplier = -1 if row["trans_code"] == "Buy" else 1
+            row["amount"] = multiplier * float(row["quantity"]) * float(row["price"])
+        rows.append(row)
+    return pd.DataFrame(rows, columns=TRANSACTION_COLUMNS)
