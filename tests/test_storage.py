@@ -1,9 +1,14 @@
 import pandas as pd
+import pytest
 
 from stock_calculator.calculations import INPUT_COLUMNS
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, calculate_trade_metrics, derive_fifo_trades
 from stock_calculator.storage import (
+    GoogleSheetsStorage,
+    LocalCsvStorage,
+    StorageConfigurationError,
     append_robinhood_transactions,
+    build_storage_backend,
     generate_planned_stops_from_transactions,
     load_planned_stops,
     load_positions,
@@ -186,6 +191,159 @@ def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
 
     assert result.closed_trades.iloc[0]["planned_stop"] == 95
     assert result.missing_planned_stops == 0
+
+
+def test_build_storage_backend_uses_local_csv_when_sheets_secrets_are_missing():
+    backend = build_storage_backend({})
+
+    assert isinstance(backend, LocalCsvStorage)
+
+
+def test_build_storage_backend_rejects_partial_google_sheets_secrets():
+    with pytest.raises(StorageConfigurationError, match="requires both"):
+        build_storage_backend({"google_sheets": {"spreadsheet_id": "sheet-id"}})
+
+
+def test_build_storage_backend_uses_google_sheets_for_complete_secrets():
+    spreadsheet = FakeSpreadsheet()
+    backend = build_storage_backend(
+        {
+            "google_sheets": {"spreadsheet_id": "sheet-id"},
+            "gcp_service_account": {"client_email": "bot@example.com"},
+        },
+        gspread_module=FakeGspreadModule(spreadsheet),
+    )
+
+    assert isinstance(backend, GoogleSheetsStorage)
+
+
+def test_google_sheets_empty_sheet_returns_normalized_empty_frame_and_header():
+    worksheet = FakeWorksheet([])
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"positions": worksheet}))
+
+    loaded = backend.load_positions()
+
+    assert loaded.empty
+    assert loaded.columns.tolist() == INPUT_COLUMNS
+    assert worksheet.values == [INPUT_COLUMNS]
+
+
+def test_google_sheets_save_writes_headers_and_normalized_rows():
+    worksheet = FakeWorksheet([])
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"planned_stops": worksheet}))
+
+    backend.save_planned_stops(
+        pd.DataFrame([{"symbol": "aapl", "buy_date": "2026-04-01", "quantity": "2", "planned_stop": "190.50"}])
+    )
+
+    assert worksheet.values == [
+        PLANNED_STOP_COLUMNS,
+        ["AAPL", "2026-04-01", 2.0, 190.5],
+    ]
+
+
+def test_google_sheets_load_preserves_expected_column_order():
+    worksheet = FakeWorksheet(
+        [
+            ["price", "symbol", "activity_date", "trans_code", "quantity"],
+            ["100", "aapl", "2026-04-01", "Buy", "1"],
+        ]
+    )
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"robinhood_transactions": worksheet}))
+
+    loaded = backend.load_robinhood_transactions()
+
+    assert loaded.columns.tolist() == TRANSACTION_COLUMNS
+    assert loaded[["symbol", "activity_date", "trans_code", "quantity", "price"]].to_dict("records") == [
+        {"symbol": "AAPL", "activity_date": "2026-04-01", "trans_code": "Buy", "quantity": 1, "price": 100}
+    ]
+
+
+def test_google_sheets_robinhood_append_deduplicates_before_save():
+    worksheet = FakeWorksheet([])
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"robinhood_transactions": worksheet}))
+    existing = _transactions([{"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy"}])
+    incoming = _transactions(
+        [
+            {"activity_date": "2026-04-01", "symbol": "aapl", "trans_code": "Buy"},
+            {"activity_date": "2026-04-02", "symbol": "MSFT", "trans_code": "Buy"},
+        ]
+    )
+
+    persisted, added_count = append_robinhood_transactions(existing, incoming)
+    backend.save_robinhood_transactions(persisted)
+
+    assert added_count == 1
+    assert [row[3] for row in worksheet.values[1:]] == ["AAPL", "MSFT"]
+
+
+def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity():
+    worksheet = FakeWorksheet([])
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"planned_stops": worksheet}))
+    planned_stops = pd.DataFrame(
+        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 180}],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+    calculated_position = pd.Series(
+        {"symbol": "aapl", "buy_date": "2026-04-01", "number_of_shares": 2, "stop_price": 190.5}
+    )
+
+    updated = upsert_planned_stop(planned_stops, calculated_position)
+    backend.save_planned_stops(updated)
+
+    assert worksheet.values == [
+        PLANNED_STOP_COLUMNS,
+        ["AAPL", "2026-04-01", 2, 190.5],
+    ]
+
+
+class WorksheetNotFound(Exception):
+    pass
+
+
+class FakeWorksheet:
+    def __init__(self, values: list[list[object]]):
+        self.values = values
+
+    def get_all_values(self):
+        return self.values
+
+    def clear(self):
+        self.values = []
+
+    def update(self, values, value_input_option=None):
+        self.values = values
+
+
+class FakeSpreadsheet:
+    def __init__(self, worksheets: dict[str, FakeWorksheet] | None = None):
+        self.worksheets = worksheets or {}
+
+    def worksheet(self, title: str):
+        if title not in self.worksheets:
+            raise WorksheetNotFound(title)
+        return self.worksheets[title]
+
+    def add_worksheet(self, title: str, rows: int, cols: int):
+        worksheet = FakeWorksheet([])
+        self.worksheets[title] = worksheet
+        return worksheet
+
+
+class FakeGspreadModule:
+    def __init__(self, spreadsheet: FakeSpreadsheet):
+        self.spreadsheet = spreadsheet
+
+    def service_account_from_dict(self, service_account):
+        return FakeGspreadClient(self.spreadsheet)
+
+
+class FakeGspreadClient:
+    def __init__(self, spreadsheet: FakeSpreadsheet):
+        self.spreadsheet = spreadsheet
+
+    def open_by_key(self, spreadsheet_id: str):
+        return self.spreadsheet
 
 
 def _transactions(overrides: list[dict]) -> pd.DataFrame:

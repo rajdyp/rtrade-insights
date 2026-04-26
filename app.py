@@ -25,16 +25,18 @@ from stock_calculator.robinhood import (
     parse_robinhood_csv,
 )
 from stock_calculator.storage import (
-    DATA_PATH,
-    PLANNED_STOPS_PATH,
-    ROBINHOOD_TRANSACTIONS_PATH,
+    StorageError,
     append_robinhood_transactions,
+    get_storage_backend,
     load_planned_stops,
     load_positions,
     load_robinhood_transactions,
+    planned_stops_label,
+    robinhood_transactions_label,
     save_planned_stops,
     save_positions,
     save_robinhood_transactions,
+    storage_label,
     upsert_planned_stop,
 )
 
@@ -630,13 +632,13 @@ def format_currency_percent_pair(currency_value, percent_value) -> str:
 
 
 def render_trade_metrics(metrics: dict | None) -> None:
-    render_section("Trade Metrics", "Derived from the local trade dataset.")
+    render_section("Trade Metrics", "Derived from stored Robinhood transactions.")
     if metrics is None:
-        st.info("Upload a Robinhood CSV to populate trade metrics.")
+        render_feedback("Upload a Robinhood CSV to populate trade metrics.", "idle")
         return
 
     if metrics.get("trade_count", 0) == 0:
-        st.info("No closed trades are available for metrics yet.")
+        render_feedback("No closed trades are available for metrics yet.", "idle")
 
     metric_rows = [
         [
@@ -675,6 +677,12 @@ def render_trade_metrics(metrics: dict | None) -> None:
 
 
 config = load_config()
+
+try:
+    get_storage_backend()
+except StorageError as exc:
+    st.error(f"Storage is not configured correctly: {exc}")
+    st.stop()
 
 
 def add_current_draft() -> None:
@@ -826,7 +834,7 @@ summary_cols[3].download_button(
 )
 
 if visible_calculated.empty:
-    st.info("No positions yet. Add a valid position from the calculator above to start the list.")
+    render_feedback("No positions yet. Add a valid position from the calculator above to start the list.", "idle")
 else:
     edited = st.data_editor(
         editor_frame(visible_calculated[PUBLIC_OUTPUT_COLUMNS]),
@@ -854,11 +862,11 @@ if invalid_positions:
         f"{row['symbol'] or f'Row {index + 1}'}: {row['validation_error']}"
         for index, row in invalid_rows.iterrows()
     ]
-    st.warning("Some rows need fixes before their calculated values can be used: " + "; ".join(messages))
+    render_feedback("Some rows need fixes before their calculated values can be used: " + "; ".join(messages), "error")
 
 with st.expander("Quip-style summary"):
     if visible_calculated.empty:
-        st.info("Add one or more symbols to see the summary.")
+        render_feedback("Add one or more symbols to see the summary.", "idle")
     else:
         summary = pd.DataFrame(
             {
@@ -892,8 +900,8 @@ with st.expander("Robinhood Import", expanded=False):
     if robinhood_file is None:
         st.session_state.pop("robinhood_import_result", None)
         render_feedback(
-            f"Upload a Robinhood CSV report to add new transactions to {ROBINHOOD_TRANSACTIONS_PATH}. "
-            f"Planned stop prices (SL) are read from {PLANNED_STOPS_PATH}.",
+            f"Upload a Robinhood CSV report to add new transactions to {robinhood_transactions_label()}. "
+            f"Planned stop prices (SL) are read from {planned_stops_label()}.",
             "idle",
         )
     else:
@@ -917,7 +925,7 @@ with st.expander("Robinhood Import", expanded=False):
         if import_result.transactions.empty:
             render_feedback("No buy or sell rows were found in the uploaded CSV.", "error")
         elif added_count:
-            render_feedback(f"Added {added_count} new Robinhood transactions to the local dataset.", "ready")
+            render_feedback(f"Added {added_count} new Robinhood transactions to {storage_label()}.", "ready")
         else:
             render_feedback("No new Robinhood transactions were added; all clean rows were already imported.", "idle")
 
@@ -934,7 +942,7 @@ with st.expander("Robinhood Import", expanded=False):
     import_summary_cols[2].metric("Skipped Rows", latest_skipped_rows)
     import_summary_cols[3].metric("Ignored Rows", current_ignored_rows)
     import_summary_cols[4].metric("Malformed Rows", current_malformed_rows)
-    import_summary_cols[5].metric("Local Rows", len(st.session_state.robinhood_transactions))
+    import_summary_cols[5].metric("Stored Rows", len(st.session_state.robinhood_transactions))
     import_summary_cols[6].metric("Closed Trades", len(robinhood_derivation.closed_trades))
     import_summary_cols[7].metric("Open Positions", len(robinhood_derivation.open_positions))
     import_summary_cols[8].metric("Missing Stops", robinhood_derivation.missing_planned_stops)
@@ -942,7 +950,7 @@ with st.expander("Robinhood Import", expanded=False):
     if robinhood_derivation.missing_planned_stops:
         render_feedback(
             f"{robinhood_derivation.missing_planned_stops} matched lot rows do not have planned stops yet. "
-            f"Fill missing entry stops in {PLANNED_STOPS_PATH}.",
+            f"Fill missing entry stops in {planned_stops_label()}.",
             "idle",
         )
 
@@ -951,7 +959,7 @@ with st.expander("Robinhood Import", expanded=False):
         if imported_result is not None and not imported_result.malformed_rows.empty:
             issue_parts.append(f"{len(imported_result.malformed_rows)} malformed rows in the latest upload")
         if not robinhood_derivation.unmatched_sells.empty:
-            issue_parts.append(f"{len(robinhood_derivation.unmatched_sells)} unmatched sells in the local dataset")
+            issue_parts.append(f"{len(robinhood_derivation.unmatched_sells)} unmatched sells in stored transactions")
         if issue_parts:
             render_feedback("Import issues found: " + ", ".join(issue_parts) + ".", "error")
 
@@ -961,7 +969,7 @@ with st.expander("Robinhood Import", expanded=False):
 
     with closed_tab:
         if robinhood_derivation.closed_trades.empty:
-            render_feedback("No closed trades were derived from the local Robinhood dataset.", "idle")
+            render_feedback("No closed trades were derived from stored Robinhood transactions.", "idle")
         else:
             st.dataframe(
                 display_date_frame(robinhood_derivation.closed_trades),
@@ -999,7 +1007,7 @@ with st.expander("Robinhood Import", expanded=False):
 
     with raw_tab:
         if st.session_state.robinhood_transactions.empty:
-            render_feedback("No clean Robinhood transactions are stored locally.", "idle")
+            render_feedback("No clean Robinhood transactions are stored yet.", "idle")
         else:
             st.dataframe(
                 display_date_frame(st.session_state.robinhood_transactions),
