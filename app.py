@@ -139,7 +139,6 @@ def apply_styles() -> None:
             font-size: 1.08rem;
             font-weight: 700;
             letter-spacing: 0.3em;
-            text-transform: uppercase;
             color: var(--app-accent);
         }
 
@@ -566,8 +565,8 @@ def render_header(total_pnl: float, target=st) -> None:
         f"""
         <div class="app-header">
           <div>
-            <div class="app-title">Stock Calculator</div>
-            <div class="app-subtitle">Position sizing &amp; portfolio risk tracking</div>
+            <div class="app-title">rTRADE INSIGHTS</div>
+            <div class="app-subtitle">Position sizing &amp; portfolio performance tracking</div>
           </div>
           <div class="header-meta">
             <span class="meta-pill"><strong>PORTFOLIO</strong>&nbsp;&nbsp;{escape(format_currency(config.portfolio_amount))}</span>
