@@ -30,13 +30,47 @@ Light and dark mode are controlled through Streamlit's settings menu.
 
 ## Data
 
-The app creates and updates local runtime CSV files under `data/`. Treat these as user-local data, not application source code.
+By default, the app creates and updates local runtime CSV files under `data/`. Treat these as user-local data, not application source code.
 
 Editable source data lives in `data/positions.csv`. The app keeps calculated fields generated from the source columns instead of saving formula outputs back into the input file.
 
 Durable entry stops live in `data/planned_stops.csv`. Robinhood trade reporting reads planned stops from this ledger by exact symbol, buy date, and quantity, so closed trades keep their original stop after active rows are removed from `positions.csv`.
 
 Cleaned Robinhood upload transactions are stored locally in `data/robinhood_transactions.csv`. Later Robinhood uploads append new transactions and skip duplicate rows so overlapping exports do not double-count metrics.
+
+## Streamlit Cloud Storage
+
+Local CSV mode is used when Google Sheets secrets are absent. To persist data on Streamlit Community Cloud, configure app secrets with a Google Sheet ID and a Google service account. Share the target Google Sheet with the service account `client_email`.
+
+Required worksheet tabs are created automatically if missing:
+
+- `positions`
+- `planned_stops`
+- `robinhood_transactions`
+
+Streamlit secrets:
+
+```toml
+[google_sheets]
+spreadsheet_id = "your-google-sheet-id"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
+```
+
+For local testing, put secrets in `.streamlit/secrets.toml`. For Streamlit Community Cloud, paste the same TOML into the app's Secrets settings. Do not commit `.streamlit/secrets.toml`, service account JSON, or `data/`.
+
+Deploy from GitHub repo `rajdyp/rtrade-insights`, branch `main`, with entrypoint `app.py`. Use Streamlit Cloud app visibility/viewer settings to restrict access for this private app.
 
 ## Config
 

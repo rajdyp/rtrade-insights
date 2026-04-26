@@ -1,4 +1,4 @@
 [defaults]
 portfolio_amount = 20000.0
-sizing_portfolio_amount = 15000.0
-risk_percent = 0.5
+sizing_portfolio_amount = 19250.0
+risk_percent = 0.25
