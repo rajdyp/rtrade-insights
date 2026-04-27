@@ -7,7 +7,7 @@ from typing import Any, Mapping, Protocol
 import pandas as pd
 
 from stock_calculator.calculations import INPUT_COLUMNS, committed_positions, normalize_input_frame
-from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS
+from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, normalize_strategy
 
 
 DATA_PATH = Path("data/positions.csv")
@@ -316,6 +316,7 @@ def generate_planned_stops_from_transactions(transactions: pd.DataFrame) -> pd.D
             "buy_date": row["activity_date"],
             "quantity": row["quantity"],
             "planned_stop": None,
+            "strategy": "",
         }
         for _, row in buys.iterrows()
     ]
@@ -383,6 +384,7 @@ def _normalize_planned_stops(df: pd.DataFrame) -> pd.DataFrame:
     normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
     normalized["quantity"] = pd.to_numeric(normalized["quantity"], errors="coerce")
     normalized["planned_stop"] = pd.to_numeric(normalized["planned_stop"], errors="coerce")
+    normalized["strategy"] = normalized["strategy"].apply(normalize_strategy)
 
     return normalized[normalized["symbol"] != ""].reset_index(drop=True)
 
@@ -403,6 +405,7 @@ def _planned_stop_from_calculated_position(row: pd.Series) -> dict[str, object] 
         "buy_date": buy_date,
         "quantity": quantity,
         "planned_stop": planned_stop,
+        "strategy": normalize_strategy(row.get("strategy")),
     }
 
 

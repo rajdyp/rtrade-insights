@@ -5,6 +5,7 @@ import pandas as pd
 
 from stock_calculator.robinhood import (
     PLANNED_STOP_COLUMNS,
+    calculate_strategy_metrics,
     calculate_total_realized_pnl,
     calculate_trade_metrics,
     derive_fifo_trades,
@@ -66,6 +67,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
                 "buy_date": "2026-04-15",
                 "quantity": 7,
                 "planned_stop": 58.25,
+                "strategy": "EP",
             }
         ],
         columns=PLANNED_STOP_COLUMNS,
@@ -75,6 +77,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
 
     row = result.closed_trades.iloc[0]
     assert row["planned_stop"] == 58.25
+    assert row["strategy"] == "EP"
     assert row["buy_price"] == 63.84
     assert row["sell_price"] == 60.90
     assert row["realized_pnl"] == -20.58
@@ -111,8 +114,8 @@ def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
     )
     planned = pd.DataFrame(
         [
-            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 4, "planned_stop": 55.25},
-            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 3, "planned_stop": 56.75},
+            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 4, "planned_stop": 55.25, "strategy": "5% BO"},
+            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 3, "planned_stop": 56.75, "strategy": "BO"},
         ],
         columns=PLANNED_STOP_COLUMNS,
     )
@@ -120,6 +123,7 @@ def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
     result = derive_fifo_trades(transactions, planned)
 
     assert result.closed_trades["planned_stop"].tolist() == [56.75, 55.25]
+    assert result.closed_trades["strategy"].tolist() == ["BO", "5% BO"]
     assert result.missing_planned_stops == 0
 
 
@@ -166,6 +170,27 @@ def test_derive_fifo_trades_accepts_duplicate_planned_stop_keys_when_stop_matche
     assert result.missing_planned_stops == 0
 
 
+def test_derive_fifo_trades_treats_conflicting_strategy_keys_as_unclassified():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-08", "symbol": "AEHR", "trans_code": "Buy", "quantity": 4, "price": 59.78},
+            {"activity_date": "2026-04-09", "symbol": "AEHR", "trans_code": "Sell", "quantity": 4, "price": 67.43},
+        ]
+    )
+    planned = pd.DataFrame(
+        [
+            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 4, "planned_stop": 55.25, "strategy": "EP"},
+            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 4, "planned_stop": 55.25, "strategy": "BO"},
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+
+    assert result.closed_trades.iloc[0]["planned_stop"] == 55.25
+    assert result.closed_trades.iloc[0]["strategy"] == ""
+
+
 def test_derive_fifo_trades_processes_same_day_buys_before_sells():
     transactions = pd.DataFrame(
         [
@@ -206,6 +231,22 @@ def test_derive_fifo_trades_calculates_open_hold_days():
 
     assert result.open_positions.iloc[0]["cost_basis"] == 357.12
     assert result.open_positions.iloc[0]["hold_days"] == 3
+
+
+def test_derive_fifo_trades_copies_strategy_to_open_positions():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-15", "symbol": "IONQ", "trans_code": "Buy", "quantity": 9, "price": 39.68},
+        ]
+    )
+    planned = pd.DataFrame(
+        [{"symbol": "IONQ", "buy_date": "2026-04-15", "quantity": 9, "planned_stop": 35.50, "strategy": "5% BO"}],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+
+    assert result.open_positions.iloc[0]["strategy"] == "5% BO"
 
 
 def test_calculate_trade_metrics_from_closed_trades():
@@ -361,3 +402,53 @@ def test_calculate_total_realized_pnl_sums_numeric_closed_trade_pnl():
 def test_calculate_total_realized_pnl_empty_or_missing_column_is_zero():
     assert calculate_total_realized_pnl(pd.DataFrame()) == 0.0
     assert calculate_total_realized_pnl(pd.DataFrame([{"symbol": "AAPL"}])) == 0.0
+
+
+def test_calculate_strategy_metrics_groups_closed_trades_by_strategy():
+    closed_trades = pd.DataFrame(
+        [
+            {
+                "strategy": "EP",
+                "sell_date": "2026-04-01",
+                "quantity": 1,
+                "planned_stop": 90,
+                "buy_price": 100,
+                "realized_pnl": 20,
+                "realized_pnl_percent": 20,
+                "hold_days": 1,
+            },
+            {
+                "strategy": "EP",
+                "sell_date": "2026-04-02",
+                "quantity": 1,
+                "planned_stop": 90,
+                "buy_price": 100,
+                "realized_pnl": -10,
+                "realized_pnl_percent": -10,
+                "hold_days": 3,
+            },
+            {
+                "strategy": "",
+                "sell_date": "2026-04-03",
+                "quantity": 1,
+                "planned_stop": 40,
+                "buy_price": 50,
+                "realized_pnl": 10,
+                "realized_pnl_percent": 20,
+                "hold_days": 2,
+            },
+        ]
+    )
+
+    result = calculate_strategy_metrics(closed_trades)
+
+    assert result[["strategy", "trade_count", "total_realized_pnl", "win_rate", "expectancy"]].to_dict("records") == [
+        {"strategy": "EP", "trade_count": 2, "total_realized_pnl": 10.0, "win_rate": 50.0, "expectancy": 5.0},
+        {
+            "strategy": "Unclassified",
+            "trade_count": 1,
+            "total_realized_pnl": 10.0,
+            "win_rate": 100.0,
+            "expectancy": 10.0,
+        },
+    ]

@@ -9,6 +9,7 @@ Personal Streamlit dashboard for position sizing, trade metrics, and portfolio t
 - Download the current positions table as CSV.
 - Import Robinhood CSV report and derive FIFO closed trades, open positions, realized P/L, and trade metrics.
 - Preserve planned stops in a durable ledger so closed trades keep their original risk context.
+- Tag each buy lot with a strategy (`EP`, `5% BO`, or `BO`) and review performance by strategy.
 
 ## Run
 
@@ -34,7 +35,7 @@ By default, the app creates and updates local runtime CSV files under `data/`. T
 
 Editable source data lives in `data/positions.csv`. The app keeps calculated fields generated from the source columns instead of saving formula outputs back into the input file.
 
-Durable entry stops live in `data/planned_stops.csv`. Robinhood trade reporting reads planned stops from this ledger by exact symbol, buy date, and quantity, so closed trades keep their original stop after active rows are removed from `positions.csv`.
+Durable entry stops and strategy tags live in `data/planned_stops.csv`. Robinhood trade reporting reads planned stops and strategies from this ledger by exact symbol, buy date, and quantity, so closed trades keep their original stop and strategy after active rows are removed from `positions.csv`. Existing rows without a strategy are shown as `Unclassified` until you backfill the `strategy` column with `EP`, `5% BO`, or `BO`.
 
 Cleaned Robinhood upload transactions are stored locally in `data/robinhood_transactions.csv`. Later Robinhood uploads append new transactions and skip duplicate rows so overlapping exports do not double-count metrics.
 
