@@ -26,6 +26,8 @@ ROBINHOOD_COLUMNS = [
 ]
 
 TRADE_CODES = {"Buy", "Sell"}
+STRATEGY_OPTIONS = ["EP", "5% BO", "BO"]
+UNCLASSIFIED_STRATEGY = "Unclassified"
 
 TRANSACTION_COLUMNS = [
     "activity_date",
@@ -44,6 +46,7 @@ PLANNED_STOP_COLUMNS = [
     "buy_date",
     "quantity",
     "planned_stop",
+    "strategy",
 ]
 
 CLOSED_TRADE_COLUMNS = [
@@ -52,6 +55,7 @@ CLOSED_TRADE_COLUMNS = [
     "sell_date",
     "quantity",
     "planned_stop",
+    "strategy",
     "buy_price",
     "buy_amount",
     "sell_price",
@@ -66,6 +70,7 @@ OPEN_POSITION_COLUMNS = [
     "buy_date",
     "quantity",
     "planned_stop",
+    "strategy",
     "buy_price",
     "cost_basis",
     "hold_days",
@@ -73,6 +78,21 @@ OPEN_POSITION_COLUMNS = [
 
 UNMATCHED_SELL_COLUMNS = ["symbol", "sell_date", "quantity", "sell_price"]
 IMPORT_ISSUE_COLUMNS = ["row_number", "issue", "raw_row"]
+STRATEGY_METRIC_COLUMNS = [
+    "strategy",
+    "trade_count",
+    "total_realized_pnl",
+    "win_rate",
+    "expectancy",
+    "profit_factor",
+    "average_win",
+    "average_loss",
+    "average_win_r",
+    "average_loss_r",
+    "r_ratio",
+    "average_win_hold",
+    "average_loss_hold",
+]
 
 
 @dataclass(frozen=True)
@@ -150,6 +170,45 @@ def calculate_total_realized_pnl(closed_trades: pd.DataFrame) -> float:
 
     realized_pnl = pd.to_numeric(closed_trades["realized_pnl"], errors="coerce")
     return round(float(realized_pnl.dropna().sum()), 2)
+
+
+def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
+    if closed_trades.empty:
+        return pd.DataFrame(columns=STRATEGY_METRIC_COLUMNS)
+
+    trades = closed_trades.copy()
+    strategy_values = trades["strategy"] if "strategy" in trades.columns else pd.Series([""] * len(trades), index=trades.index)
+    trades["strategy_group"] = strategy_values.apply(display_strategy)
+    rows = []
+    grouped_by_strategy = dict(tuple(trades.groupby("strategy_group", sort=False, dropna=False)))
+    for strategy in [*STRATEGY_OPTIONS, UNCLASSIFIED_STRATEGY]:
+        grouped_trades = grouped_by_strategy.get(strategy)
+        if grouped_trades is None:
+            continue
+        metrics = calculate_trade_metrics(grouped_trades)
+        if metrics["trade_count"] == 0:
+            continue
+        rows.append(
+            {
+                "strategy": strategy,
+                "trade_count": metrics["trade_count"],
+                "total_realized_pnl": calculate_total_realized_pnl(grouped_trades),
+                "win_rate": metrics["win_rate"],
+                "expectancy": metrics["expectancy"],
+                "profit_factor": metrics["profit_factor"],
+                "average_win": metrics["average_win"],
+                "average_loss": metrics["average_loss"],
+                "average_win_r": metrics["average_win_r"],
+                "average_loss_r": metrics["average_loss_r"],
+                "r_ratio": metrics["r_ratio"],
+                "average_win_hold": metrics["average_win_hold"],
+                "average_loss_hold": metrics["average_loss_hold"],
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=STRATEGY_METRIC_COLUMNS)
+    return pd.DataFrame(rows, columns=STRATEGY_METRIC_COLUMNS)
 
 
 def parse_robinhood_csv(source: str | Path | TextIO | Any) -> ImportResult:
@@ -263,7 +322,10 @@ def derive_fifo_trades(
                     "buy_date": buy_date,
                     "quantity": quantity,
                     "buy_price": float(row["price"]),
-                    "planned_stop": planned_stop_lookup.get((symbol, buy_date, _quantity_key(quantity))),
+                    **planned_stop_lookup.get(
+                        (symbol, buy_date, _quantity_key(quantity)),
+                        {"planned_stop": None, "strategy": ""},
+                    ),
                 }
             )
             continue
@@ -287,6 +349,7 @@ def derive_fifo_trades(
                     "sell_date": sell_date,
                     "quantity": _clean_quantity(matched_quantity),
                     "planned_stop": lot["planned_stop"],
+                    "strategy": lot["strategy"],
                     "buy_price": buy_price,
                     "buy_amount": buy_amount,
                     "sell_price": sell_price,
@@ -324,6 +387,7 @@ def derive_fifo_trades(
                     "buy_date": lot["buy_date"],
                     "quantity": quantity,
                     "planned_stop": lot["planned_stop"],
+                    "strategy": lot["strategy"],
                     "buy_price": float(lot["buy_price"]),
                     "cost_basis": round(float(lot["quantity"]) * float(lot["buy_price"]), 2),
                     "hold_days": weekday_hold_count(lot["buy_date"], as_of=as_of),
@@ -371,11 +435,22 @@ def _normalize_transactions(transactions: pd.DataFrame) -> pd.DataFrame:
     return normalized.sort_values(["activity_date", "symbol", "side_rank"]).reset_index(drop=True)
 
 
-def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, str, float], float | None]:
+def normalize_strategy(value: Any) -> str:
+    strategy = str(value or "").strip()
+    return strategy if strategy in STRATEGY_OPTIONS else ""
+
+
+def display_strategy(value: Any) -> str:
+    strategy = normalize_strategy(value)
+    return strategy or UNCLASSIFIED_STRATEGY
+
+
+def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, str, float], dict[str, float | str | None]]:
     if planned_stops is None or planned_stops.empty:
         return {}
 
     stops_by_key: defaultdict[tuple[str, str, float], set[float]] = defaultdict(set)
+    strategies_by_key: defaultdict[tuple[str, str, float], set[str]] = defaultdict(set)
     for _, row in planned_stops.iterrows():
         symbol = str(row.get("symbol") or "").upper().strip()
         if not symbol:
@@ -389,11 +464,22 @@ def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, 
         key = (symbol, buy_date.date().isoformat(), _quantity_key(quantity))
 
         planned_stop = pd.to_numeric(row.get("planned_stop"), errors="coerce")
-        if pd.isna(planned_stop):
-            continue
-        stops_by_key[key].add(float(planned_stop))
+        if not pd.isna(planned_stop):
+            stops_by_key[key].add(float(planned_stop))
 
-    return {key: next(iter(stops)) if len(stops) == 1 else None for key, stops in stops_by_key.items()}
+        strategy = normalize_strategy(row.get("strategy"))
+        if strategy:
+            strategies_by_key[key].add(strategy)
+
+    lookup = {}
+    for key in set(stops_by_key) | set(strategies_by_key):
+        stops = stops_by_key[key]
+        strategies = strategies_by_key[key]
+        lookup[key] = {
+            "planned_stop": next(iter(stops)) if len(stops) == 1 else None,
+            "strategy": next(iter(strategies)) if len(strategies) == 1 else "",
+        }
+    return lookup
 
 
 def _parse_money(value: Any) -> float | None:

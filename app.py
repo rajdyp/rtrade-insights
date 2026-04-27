@@ -19,9 +19,12 @@ from stock_calculator.calculations import (
 )
 from stock_calculator.config import load_config
 from stock_calculator.robinhood import (
+    STRATEGY_OPTIONS,
+    calculate_strategy_metrics,
     calculate_total_realized_pnl,
     calculate_trade_metrics,
     derive_fifo_trades,
+    display_strategy,
     parse_robinhood_csv,
 )
 from stock_calculator.storage import (
@@ -488,6 +491,7 @@ def closed_trades_column_config() -> dict:
         "sell_date": st.column_config.DateColumn("Sell Date", format="MM/DD/YYYY", width=108),
         "quantity": st.column_config.NumberColumn("Quantity", width=86),
         "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
+        "strategy": st.column_config.TextColumn("Strategy", width=90),
         "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=104),
         "buy_amount": st.column_config.NumberColumn("Buy Amount", format="$%.2f", width=116),
         "sell_price": st.column_config.NumberColumn("Sell Price", format="$%.2f", width=104),
@@ -504,6 +508,7 @@ def open_positions_column_config() -> dict:
         "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=108),
         "quantity": st.column_config.NumberColumn("Quantity", width=86),
         "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
+        "strategy": st.column_config.TextColumn("Strategy", width=90),
         "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=104),
         "cost_basis": st.column_config.NumberColumn("Cost Basis", format="$%.2f", width=116),
         "hold_days": st.column_config.NumberColumn("Hold Days", width=88),
@@ -523,6 +528,8 @@ def display_date_frame(df: pd.DataFrame) -> pd.DataFrame:
     for column in ["buy_date", "sell_date", "activity_date", "process_date", "settle_date"]:
         if column in frame.columns:
             frame[column] = pd.to_datetime(frame[column], errors="coerce").dt.date
+    if "strategy" in frame.columns:
+        frame["strategy"] = frame["strategy"].apply(display_strategy)
     return frame
 
 
@@ -630,7 +637,25 @@ def format_currency_percent_pair(currency_value, percent_value) -> str:
     return f"{format_currency(currency_value)} ({format_percent(percent_value)})"
 
 
-def render_trade_metrics(metrics: dict | None) -> None:
+def strategy_metrics_column_config() -> dict:
+    return {
+        "strategy": st.column_config.TextColumn("Strategy", width=100),
+        "trade_count": st.column_config.NumberColumn("Trades", width=78),
+        "total_realized_pnl": st.column_config.NumberColumn("Total P/L", format="$%.2f", width=104),
+        "win_rate": st.column_config.NumberColumn("Win Rate", format="%.1f%%", width=92),
+        "expectancy": st.column_config.NumberColumn("Expectancy", format="$%.2f", width=104),
+        "profit_factor": st.column_config.NumberColumn("Profit Factor", format="%.2f", width=106),
+        "average_win": st.column_config.NumberColumn("Avg Win", format="$%.2f", width=96),
+        "average_loss": st.column_config.NumberColumn("Avg Loss", format="$%.2f", width=96),
+        "average_win_r": st.column_config.NumberColumn("Avg R Win", format="%.2f", width=92),
+        "average_loss_r": st.column_config.NumberColumn("Avg R Loss", format="%.2f", width=96),
+        "r_ratio": st.column_config.NumberColumn("R Ratio", format="%.2f", width=86),
+        "average_win_hold": st.column_config.NumberColumn("Avg Win Hold", format="%.1f", width=108),
+        "average_loss_hold": st.column_config.NumberColumn("Avg Loss Hold", format="%.1f", width=112),
+    }
+
+
+def render_trade_metrics(metrics: dict | None, strategy_metrics: pd.DataFrame | None) -> None:
     render_section("Trade Metrics", "Derived from stored Robinhood transactions.")
     if metrics is None:
         render_feedback("Upload a Robinhood CSV to populate trade metrics.", "idle")
@@ -674,6 +699,17 @@ def render_trade_metrics(metrics: dict | None) -> None:
             label, value = metric_value
             column.metric(label, value)
 
+    if strategy_metrics is None or strategy_metrics.empty:
+        render_feedback("No strategy breakdown is available yet.", "idle")
+        return
+
+    st.dataframe(
+        strategy_metrics,
+        column_config=strategy_metrics_column_config(),
+        hide_index=True,
+        width="stretch",
+    )
+
 
 config = load_config()
 
@@ -699,6 +735,7 @@ def add_current_draft() -> None:
         return
 
     st.session_state.positions = append_committed_position(st.session_state.positions, draft_from_state)
+    calculated_draft.loc[calculated_draft.index[0], "strategy"] = st.session_state.get("draft_strategy", STRATEGY_OPTIONS[0])
     st.session_state.planned_stops = upsert_planned_stop(st.session_state.planned_stops, calculated_draft.iloc[0])
     save_positions(st.session_state.positions)
     save_planned_stops(st.session_state.planned_stops)
@@ -708,6 +745,7 @@ def add_current_draft() -> None:
     st.session_state.draft_stop_price = 0.0
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
     st.session_state.draft_risk_percent = config.risk_percent
+    st.session_state.draft_strategy = STRATEGY_OPTIONS[0]
 
 
 def delete_selected_positions(selected_rows: list[int]) -> None:
@@ -738,11 +776,14 @@ if "draft_portfolio_amount" not in st.session_state:
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
 if "draft_risk_percent" not in st.session_state:
     st.session_state.draft_risk_percent = config.risk_percent
+if "draft_strategy" not in st.session_state:
+    st.session_state.draft_strategy = STRATEGY_OPTIONS[0]
 if "position_editor_revision" not in st.session_state:
     st.session_state.position_editor_revision = 0
 
 robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
 trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
+strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
 total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
 
 apply_styles()
@@ -751,7 +792,7 @@ render_header(total_pnl, header_container)
 
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
-top_cols = st.columns([1.2, 1, 1, 1, 1, 0.8])
+top_cols = st.columns([1.2, 1, 1, 1, 1, 0.8, 0.9])
 symbol = top_cols[0].text_input("Symbol", key="draft_symbol").upper().strip()
 buy_date = top_cols[1].date_input("Buy Date", key="draft_buy_date")
 share_price = top_cols[2].number_input("Share Price", min_value=0.0, step=0.01, format="%.2f", key="draft_share_price")
@@ -770,6 +811,7 @@ risk_percent = top_cols[5].number_input(
     format="%.2f",
     key="draft_risk_percent",
 )
+top_cols[6].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
 
 draft = draft_position(
     symbol=symbol,
@@ -917,6 +959,7 @@ with st.expander("Robinhood Import", expanded=False):
         st.session_state.robinhood_last_skipped_count = skipped_count
         robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
         trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
+        strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
         total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
         render_header(total_pnl, header_container)
         st.session_state.robinhood_import_result = import_result
@@ -1016,4 +1059,4 @@ with st.expander("Robinhood Import", expanded=False):
             )
 
 with trade_metrics_container:
-    render_trade_metrics(trade_metrics)
+    render_trade_metrics(trade_metrics, strategy_metrics)
