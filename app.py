@@ -646,22 +646,22 @@ def format_currency_percent_pair(currency_value, percent_value) -> str:
 
 def strategy_metrics_column_config() -> dict:
     return {
-        "strategy": st.column_config.TextColumn("Strategy", width=100),
-        "trade_count": st.column_config.NumberColumn("Trades", width=78),
-        "total_realized_pnl": st.column_config.NumberColumn("Total P/L", format="$%.2f", width=104),
-        "win_rate": st.column_config.NumberColumn("Win Rate", format="%.1f%%", width=92),
-        "expectancy": st.column_config.NumberColumn("Expectancy", format="$%.2f", width=104),
-        "profit_factor": st.column_config.NumberColumn("Profit Factor", format="%.2f", width=106),
-        "average_win": st.column_config.NumberColumn("Avg Win", format="$%.2f", width=96),
-        "average_loss": st.column_config.NumberColumn("Avg Loss", format="$%.2f", width=96),
-        "average_win_r": st.column_config.NumberColumn("Avg R Win", format="%.2f", width=92),
-        "average_loss_r": st.column_config.NumberColumn("Avg R Loss", format="%.2f", width=96),
-        "r_ratio": st.column_config.NumberColumn("R Ratio", format="%.2f", width=86),
-        "average_win_hold": st.column_config.NumberColumn("Avg Win Hold", format="%.1f", width=108),
-        "average_loss_hold": st.column_config.NumberColumn("Avg Loss Hold", format="%.1f", width=112),
-        "rolling_10r_exp": st.column_config.TextColumn("Rolling 10R Exp", width=124),
-        "mode": st.column_config.TextColumn("Mode", width=88),
-        "action": st.column_config.TextColumn("Action", width=136),
+        "strategy": st.column_config.TextColumn("Strategy", width=74),
+        "trade_count": st.column_config.NumberColumn("Trades", width=58),
+        "total_realized_pnl": st.column_config.NumberColumn("P/L", format="$%.2f", width=88),
+        "win_rate": st.column_config.NumberColumn("Win %", format="%.1f%%", width=72),
+        "expectancy": st.column_config.NumberColumn("Exp $", format="$%.2f", width=84),
+        "profit_factor": st.column_config.NumberColumn("PF", format="%.2f", width=62),
+        "average_win": st.column_config.NumberColumn("Avg Win", format="$%.2f", width=84),
+        "average_loss": st.column_config.NumberColumn("Avg Loss", format="$%.2f", width=84),
+        "average_win_r": st.column_config.NumberColumn("Avg R W", format="%.2f", width=76),
+        "average_loss_r": st.column_config.NumberColumn("Avg R L", format="%.2f", width=76),
+        "r_ratio": st.column_config.NumberColumn("R Ratio", format="%.2f", width=72),
+        "average_win_hold": st.column_config.NumberColumn("Win Hold", format="%.1f", width=78),
+        "average_loss_hold": st.column_config.NumberColumn("Loss Hold", format="%.1f", width=82),
+        "rolling_10r_exp": st.column_config.TextColumn("10R Exp", width=82),
+        "mode": st.column_config.TextColumn("Mode", width=82),
+        "action": st.column_config.TextColumn("Action", width=122),
     }
 
 
