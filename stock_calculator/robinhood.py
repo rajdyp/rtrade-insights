@@ -92,6 +92,9 @@ STRATEGY_METRIC_COLUMNS = [
     "r_ratio",
     "average_win_hold",
     "average_loss_hold",
+    "rolling_10r_exp",
+    "mode",
+    "action",
 ]
 
 
@@ -132,9 +135,11 @@ def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | in
     r_losses = r_trades[r_trades["realized_pnl"] < 0]
     average_win_r = _mean(r_wins["r_multiple"])
     average_loss_r = _mean(r_losses["r_multiple"])
+    expectancy_r = _mean(r_trades["r_multiple"])
 
     wins = trades[trades["realized_pnl"] > 0]
     losses = trades[trades["realized_pnl"] < 0]
+    breakevens = trades[trades["realized_pnl"] == 0]
     gross_win = float(wins["realized_pnl"].sum())
     gross_loss = abs(float(losses["realized_pnl"].sum()))
     average_win = _mean(wins["realized_pnl"])
@@ -142,6 +147,9 @@ def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | in
 
     return {
         "trade_count": len(trades),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "breakeven_count": len(breakevens),
         "win_rate": round((len(wins) / len(trades)) * 100, 1),
         "win_loss_ratio": _safe_round(average_win / abs(average_loss)) if average_win is not None and average_loss else None,
         "average_win_r": _safe_round(average_win_r),
@@ -149,6 +157,7 @@ def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | in
         "r_ratio": _safe_round(average_win_r / abs(average_loss_r))
         if average_win_r is not None and average_loss_r
         else None,
+        "expectancy_r": _safe_round(expectancy_r),
         "expectancy": _safe_round(_mean(trades["realized_pnl"])),
         "profit_factor": _safe_round(gross_win / gross_loss) if gross_loss else None,
         "average_win": _safe_round(average_win),
@@ -172,6 +181,27 @@ def calculate_total_realized_pnl(closed_trades: pd.DataFrame) -> float:
     return round(float(realized_pnl.dropna().sum()), 2)
 
 
+def calculate_rolling_10r_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
+    rolling_10r = _calculate_rolling_10r_exp(closed_trades)
+    if rolling_10r is None:
+        return {"rolling_10r_exp": "N/A", "mode": "Unknown", "action": "Tiny size only"}
+
+    if rolling_10r > 0.30:
+        mode = "Working"
+        action = "Normal size"
+    elif rolling_10r >= 0:
+        mode = "Caution"
+        action = "Half size"
+    elif rolling_10r >= -0.25:
+        mode = "Weak"
+        action = "Quarter size"
+    else:
+        mode = "Failing"
+        action = "Probe only / pause"
+
+    return {"rolling_10r_exp": f"{rolling_10r:+.2f}R", "mode": mode, "action": action}
+
+
 def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
     if closed_trades.empty:
         return pd.DataFrame(columns=STRATEGY_METRIC_COLUMNS)
@@ -188,6 +218,7 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
         metrics = calculate_trade_metrics(grouped_trades)
         if metrics["trade_count"] == 0:
             continue
+        rolling_10r_mode = calculate_rolling_10r_mode(grouped_trades)
         rows.append(
             {
                 "strategy": strategy,
@@ -203,12 +234,37 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
                 "r_ratio": metrics["r_ratio"],
                 "average_win_hold": metrics["average_win_hold"],
                 "average_loss_hold": metrics["average_loss_hold"],
+                "rolling_10r_exp": rolling_10r_mode["rolling_10r_exp"],
+                "mode": rolling_10r_mode["mode"],
+                "action": rolling_10r_mode["action"],
             }
         )
 
     if not rows:
         return pd.DataFrame(columns=STRATEGY_METRIC_COLUMNS)
     return pd.DataFrame(rows, columns=STRATEGY_METRIC_COLUMNS)
+
+
+def _calculate_rolling_10r_exp(closed_trades: pd.DataFrame) -> float | None:
+    if len(closed_trades) < 10:
+        return None
+
+    trades = closed_trades.copy()
+    trades["sell_date"] = pd.to_datetime(trades.get("sell_date"), errors="coerce")
+    trades = trades.sort_values("sell_date", kind="mergesort").tail(10).copy()
+    if len(trades) < 10:
+        return None
+
+    for column in ["realized_pnl", "buy_price", "planned_stop", "quantity"]:
+        trades[column] = pd.to_numeric(trades.get(column), errors="coerce")
+
+    trades["initial_risk"] = (trades["buy_price"] - trades["planned_stop"]) * trades["quantity"]
+    trades["r_multiple"] = trades["realized_pnl"] / trades["initial_risk"]
+    valid_r_multiples = trades.loc[trades["initial_risk"] > 0, "r_multiple"].dropna()
+    if len(valid_r_multiples) != 10:
+        return None
+
+    return float(valid_r_multiples.sum()) / 10
 
 
 def parse_robinhood_csv(source: str | Path | TextIO | Any) -> ImportResult:
@@ -531,11 +587,15 @@ def _missing_stop_count(frame: pd.DataFrame) -> int:
 def _empty_trade_metrics() -> dict[str, float | int | None]:
     return {
         "trade_count": 0,
+        "win_count": 0,
+        "loss_count": 0,
+        "breakeven_count": 0,
         "win_rate": None,
         "win_loss_ratio": None,
         "average_win_r": None,
         "average_loss_r": None,
         "r_ratio": None,
+        "expectancy_r": None,
         "expectancy": None,
         "profit_factor": None,
         "average_win": None,

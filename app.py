@@ -565,9 +565,15 @@ def marked_delete_rows(edited: pd.DataFrame) -> list[int]:
     return [int(index) for index, selected in edited[DELETE_COLUMN].items() if not pd.isna(selected) and bool(selected)]
 
 
-def render_header(total_pnl: float, target=st) -> None:
+def render_header(total_pnl: float, metrics: dict | None, target=st) -> None:
     total_pnl_percent = (total_pnl / config.portfolio_amount) * 100 if config.portfolio_amount else 0.0
     total_pnl_display = f"{format_currency(total_pnl)} ({format_percent(total_pnl_percent)})"
+    metrics = metrics or {}
+    outcome_counts_display = (
+        f"WINS {int(metrics.get('win_count') or 0)}"
+        f"&nbsp;&nbsp;LOSSES {int(metrics.get('loss_count') or 0)}"
+        f"&nbsp;&nbsp;BREAKEVENS {int(metrics.get('breakeven_count') or 0)}"
+    )
     target.markdown(
         f"""
         <div class="app-header">
@@ -578,6 +584,7 @@ def render_header(total_pnl: float, target=st) -> None:
           <div class="header-meta">
             <span class="meta-pill"><strong>PORTFOLIO</strong>&nbsp;&nbsp;{escape(format_currency(config.portfolio_amount))}</span>
             <span class="meta-pill"><strong>TOTAL P&amp;L</strong>&nbsp;&nbsp;{escape(total_pnl_display)}</span>
+            <span class="meta-pill">{outcome_counts_display}</span>
           </div>
         </div>
         """,
@@ -652,6 +659,9 @@ def strategy_metrics_column_config() -> dict:
         "r_ratio": st.column_config.NumberColumn("R Ratio", format="%.2f", width=86),
         "average_win_hold": st.column_config.NumberColumn("Avg Win Hold", format="%.1f", width=108),
         "average_loss_hold": st.column_config.NumberColumn("Avg Loss Hold", format="%.1f", width=112),
+        "rolling_10r_exp": st.column_config.TextColumn("Rolling 10R Exp", width=124),
+        "mode": st.column_config.TextColumn("Mode", width=88),
+        "action": st.column_config.TextColumn("Action", width=136),
     }
 
 
@@ -675,7 +685,7 @@ def render_trade_metrics(metrics: dict | None, strategy_metrics: pd.DataFrame | 
             ("Avg R (Wins)", format_optional_number(metrics.get("average_win_r"))),
             ("Avg R (Losses)", format_optional_number(metrics.get("average_loss_r"))),
             ("R Ratio (Win/Loss)", format_optional_number(metrics.get("r_ratio"))),
-            None,
+            ("Expectancy in R", format_optional_number(metrics.get("expectancy_r"))),
         ],
         [
             ("Average Win", format_currency_percent_pair(metrics.get("average_win"), metrics.get("average_win_percent"))),
@@ -788,7 +798,7 @@ total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
 
 apply_styles()
 header_container = st.empty()
-render_header(total_pnl, header_container)
+render_header(total_pnl, trade_metrics, header_container)
 
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
@@ -961,7 +971,7 @@ with st.expander("Robinhood Import", expanded=False):
         trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
         strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
         total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
-        render_header(total_pnl, header_container)
+        render_header(total_pnl, trade_metrics, header_container)
         st.session_state.robinhood_import_result = import_result
 
         if import_result.transactions.empty:
