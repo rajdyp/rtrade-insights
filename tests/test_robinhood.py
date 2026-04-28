@@ -303,11 +303,15 @@ def test_calculate_trade_metrics_from_closed_trades():
     metrics = calculate_trade_metrics(closed_trades)
 
     assert metrics["trade_count"] == 5
+    assert metrics["win_count"] == 3
+    assert metrics["loss_count"] == 2
+    assert metrics["breakeven_count"] == 0
     assert metrics["win_rate"] == 60.0
     assert metrics["win_loss_ratio"] == 1.17
     assert metrics["average_win_r"] == 2.33
     assert metrics["average_loss_r"] == -2.0
     assert metrics["r_ratio"] == 1.17
+    assert metrics["expectancy_r"] == 0.6
     assert metrics["expectancy"] == 6.0
     assert metrics["profit_factor"] == 1.75
     assert metrics["average_win"] == 23.33
@@ -372,17 +376,75 @@ def test_calculate_trade_metrics_excludes_invalid_stop_data_from_r_metrics():
     assert metrics["average_win_r"] == 2.0
     assert metrics["average_loss_r"] == -1.0
     assert metrics["r_ratio"] == 2.0
+    assert metrics["expectancy_r"] == 0.5
+
+
+def test_calculate_trade_metrics_counts_wins_losses_and_breakevens_from_numeric_pnl():
+    closed_trades = pd.DataFrame(
+        [
+            {
+                "sell_date": "2026-04-01",
+                "quantity": 1,
+                "planned_stop": 90,
+                "buy_price": 100,
+                "realized_pnl": 20,
+                "realized_pnl_percent": 10,
+                "hold_days": 1,
+            },
+            {
+                "sell_date": "2026-04-02",
+                "quantity": 1,
+                "planned_stop": 90,
+                "buy_price": 100,
+                "realized_pnl": -5,
+                "realized_pnl_percent": -2.5,
+                "hold_days": 1,
+            },
+            {
+                "sell_date": "2026-04-03",
+                "quantity": 1,
+                "planned_stop": 90,
+                "buy_price": 100,
+                "realized_pnl": 0,
+                "realized_pnl_percent": 0,
+                "hold_days": 1,
+            },
+            {
+                "sell_date": "2026-04-04",
+                "quantity": 1,
+                "planned_stop": 90,
+                "buy_price": 100,
+                "realized_pnl": "0.00",
+                "realized_pnl_percent": 0,
+                "hold_days": 1,
+            },
+            {"sell_date": "2026-04-05", "realized_pnl": None, "realized_pnl_percent": None, "hold_days": 1},
+            {"sell_date": "2026-04-06", "realized_pnl": "not a number", "realized_pnl_percent": None, "hold_days": 1},
+        ]
+    )
+
+    metrics = calculate_trade_metrics(closed_trades)
+
+    assert metrics["trade_count"] == 4
+    assert metrics["win_count"] == 1
+    assert metrics["loss_count"] == 1
+    assert metrics["breakeven_count"] == 2
+    assert metrics["expectancy_r"] == 0.38
 
 
 def test_calculate_trade_metrics_empty_closed_trades_are_safe():
     metrics = calculate_trade_metrics(pd.DataFrame())
 
     assert metrics["trade_count"] == 0
+    assert metrics["win_count"] == 0
+    assert metrics["loss_count"] == 0
+    assert metrics["breakeven_count"] == 0
     assert metrics["win_rate"] is None
     assert metrics["profit_factor"] is None
     assert metrics["average_win_r"] is None
     assert metrics["average_loss_r"] is None
     assert metrics["r_ratio"] is None
+    assert metrics["expectancy_r"] is None
     assert metrics["win_streak"] == 0
     assert metrics["loss_streak"] == 0
 
@@ -451,4 +513,100 @@ def test_calculate_strategy_metrics_groups_closed_trades_by_strategy():
             "win_rate": 100.0,
             "expectancy": 10.0,
         },
+    ]
+
+
+def _closed_trade(strategy="EP", sell_date="2026-04-01", r_multiple=0.0, planned_stop=90, buy_price=100):
+    return {
+        "strategy": strategy,
+        "sell_date": sell_date,
+        "quantity": 1,
+        "planned_stop": planned_stop,
+        "buy_price": buy_price,
+        "realized_pnl": (buy_price - planned_stop) * r_multiple,
+        "realized_pnl_percent": r_multiple * 10,
+        "hold_days": 1,
+    }
+
+
+def test_calculate_strategy_metrics_adds_rolling_10r_mode_and_action_from_r_multiples():
+    closed_trades = pd.DataFrame(
+        [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.35) for day in range(1, 11)]
+    )
+
+    result = calculate_strategy_metrics(closed_trades)
+
+    assert result[["rolling_10r_exp", "mode", "action"]].to_dict("records") == [
+        {"rolling_10r_exp": "+0.35R", "mode": "Working", "action": "Normal size"}
+    ]
+
+
+def test_calculate_strategy_metrics_uses_latest_10_closed_trades_by_sell_date():
+    old_large_winner = _closed_trade(sell_date="2026-04-01", r_multiple=10)
+    latest_weak_trades = [
+        _closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=-0.1)
+        for day in range(2, 12)
+    ]
+    closed_trades = pd.DataFrame([*latest_weak_trades, old_large_winner])
+
+    result = calculate_strategy_metrics(closed_trades)
+
+    assert result.iloc[0]["rolling_10r_exp"] == "-0.10R"
+    assert result.iloc[0]["mode"] == "Weak"
+    assert result.iloc[0]["action"] == "Quarter size"
+
+
+def test_calculate_strategy_metrics_requires_10_closed_trades_for_rolling_10r():
+    closed_trades = pd.DataFrame(
+        [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=1) for day in range(1, 10)]
+    )
+
+    result = calculate_strategy_metrics(closed_trades)
+
+    assert result.iloc[0]["rolling_10r_exp"] == "N/A"
+    assert result.iloc[0]["mode"] == "Unknown"
+    assert result.iloc[0]["action"] == "Tiny size only"
+
+
+def test_calculate_strategy_metrics_requires_latest_10_trades_to_have_valid_r_risk():
+    trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(1, 11)]
+    trades[-1]["planned_stop"] = 100
+    closed_trades = pd.DataFrame(trades)
+
+    result = calculate_strategy_metrics(closed_trades)
+
+    assert result.iloc[0]["rolling_10r_exp"] == "N/A"
+    assert result.iloc[0]["mode"] == "Unknown"
+    assert result.iloc[0]["action"] == "Tiny size only"
+
+
+def test_calculate_strategy_metrics_maps_rolling_10r_thresholds():
+    cases = [
+        (0.30, "+0.30R", "Caution", "Half size"),
+        (0.00, "+0.00R", "Caution", "Half size"),
+        (-0.25, "-0.25R", "Weak", "Quarter size"),
+        (-0.30, "-0.30R", "Failing", "Probe only / pause"),
+    ]
+
+    for r_multiple, expected_exp, expected_mode, expected_action in cases:
+        closed_trades = pd.DataFrame(
+            [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=r_multiple) for day in range(1, 11)]
+        )
+
+        result = calculate_strategy_metrics(closed_trades)
+
+        assert result.iloc[0]["rolling_10r_exp"] == expected_exp
+        assert result.iloc[0]["mode"] == expected_mode
+        assert result.iloc[0]["action"] == expected_action
+
+
+def test_calculate_strategy_metrics_calculates_rolling_10r_per_strategy():
+    ep_trades = [_closed_trade(strategy="EP", sell_date=f"2026-04-{day:02d}", r_multiple=0.4) for day in range(1, 11)]
+    bo_trades = [_closed_trade(strategy="BO", sell_date=f"2026-04-{day:02d}", r_multiple=-0.3) for day in range(1, 11)]
+
+    result = calculate_strategy_metrics(pd.DataFrame([*bo_trades, *ep_trades]))
+
+    assert result[["strategy", "rolling_10r_exp", "mode", "action"]].to_dict("records") == [
+        {"strategy": "EP", "rolling_10r_exp": "+0.40R", "mode": "Working", "action": "Normal size"},
+        {"strategy": "BO", "rolling_10r_exp": "-0.30R", "mode": "Failing", "action": "Probe only / pause"},
     ]
