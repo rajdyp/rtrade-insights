@@ -252,8 +252,6 @@ def _calculate_rolling_10r_exp(closed_trades: pd.DataFrame) -> float | None:
     trades = closed_trades.copy()
     trades["sell_date"] = pd.to_datetime(trades.get("sell_date"), errors="coerce")
     trades = trades.sort_values("sell_date", kind="mergesort").tail(10).copy()
-    if len(trades) < 10:
-        return None
 
     for column in ["realized_pnl", "buy_price", "planned_stop", "quantity"]:
         trades[column] = pd.to_numeric(trades.get(column), errors="coerce")
