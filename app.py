@@ -20,11 +20,13 @@ from stock_calculator.calculations import (
 from stock_calculator.config import load_config
 from stock_calculator.robinhood import (
     STRATEGY_OPTIONS,
+    UNCLASSIFIED_STRATEGY,
     calculate_strategy_metrics,
     calculate_total_realized_pnl,
     calculate_trade_metrics,
     derive_fifo_trades,
     display_strategy,
+    normalize_strategy,
     parse_robinhood_csv,
 )
 from stock_calculator.storage import (
@@ -47,6 +49,22 @@ from stock_calculator.storage import (
 st.set_page_config(page_title="Stock Calculator", layout="wide")
 
 DELETE_COLUMN = "delete_selected"
+POSITION_EDITOR_COLUMNS = [
+    "symbol",
+    "buy_date",
+    "share_price",
+    "stop_price",
+    "strategy",
+    "stop_loss_percent",
+    "number_of_shares",
+    "sell_lot",
+    "hold_count",
+    "position_size",
+    "risk_percent",
+    "risk_amount",
+    "portfolio_amount",
+]
+EDITABLE_POSITION_COLUMNS = [*INPUT_COLUMNS, "strategy"]
 POSITIONS_TABLE_MIN_VISIBLE_ROWS = 5
 ROBINHOOD_TABLE_HEADER_HEIGHT = 36
 ROBINHOOD_TABLE_ROW_HEIGHT = 35
@@ -472,6 +490,11 @@ def positions_column_config() -> dict:
         "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=108),
         "share_price": st.column_config.NumberColumn("Share Price", format="$%.2f", width=110),
         "stop_price": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
+        "strategy": st.column_config.SelectboxColumn(
+            "Strategy",
+            options=[*STRATEGY_OPTIONS, UNCLASSIFIED_STRATEGY],
+            width=90,
+        ),
         "stop_loss_percent": st.column_config.NumberColumn("Stop Loss", format="%.2f%%", width=86),
         "number_of_shares": st.column_config.NumberColumn("Shares", width=78),
         "sell_lot": st.column_config.NumberColumn("Sell Lot", width=78),
@@ -521,6 +544,51 @@ def editor_frame(df: pd.DataFrame) -> pd.DataFrame:
         frame["buy_date"] = pd.to_datetime(frame["buy_date"], errors="coerce").dt.date
     frame[DELETE_COLUMN] = False
     return frame
+
+
+def positions_editor_frame(positions: pd.DataFrame, planned_stops: pd.DataFrame) -> pd.DataFrame:
+    frame = positions.copy()
+    frame["strategy"] = [planned_strategy(row, planned_stops) for _, row in frame.iterrows()]
+    return editor_frame(frame[POSITION_EDITOR_COLUMNS])
+
+
+def planned_strategy(row: pd.Series, planned_stops: pd.DataFrame) -> str:
+    symbol = str(row.get("symbol") or "").upper().strip()
+    buy_date = str(row.get("buy_date") or "").strip()
+    quantity = pd.to_numeric(row.get("number_of_shares"), errors="coerce")
+    if not symbol or not buy_date or pd.isna(quantity):
+        return UNCLASSIFIED_STRATEGY
+
+    normalized_stops = planned_stops.copy()
+    if normalized_stops.empty:
+        return UNCLASSIFIED_STRATEGY
+
+    matches = normalized_stops[
+        (normalized_stops["symbol"].fillna("").astype(str).str.upper().str.strip() == symbol)
+        & (normalized_stops["buy_date"].fillna("").astype(str).str.strip() == buy_date)
+        & (pd.to_numeric(normalized_stops["quantity"], errors="coerce") == quantity)
+    ]
+    strategies = {normalize_strategy(strategy) for strategy in matches.get("strategy", [])}
+    strategies.discard("")
+    return next(iter(strategies)) if len(strategies) == 1 else UNCLASSIFIED_STRATEGY
+
+
+def edited_position_strategies(edited: pd.DataFrame) -> list[str]:
+    edited_positions = edited[edited["symbol"].fillna("").astype(str).str.strip() != ""]
+    return [normalize_strategy(strategy) for strategy in edited_positions.get("strategy", [])]
+
+
+def upsert_position_strategies(
+    planned_stops: pd.DataFrame,
+    calculated_positions: pd.DataFrame,
+    strategies: list[str],
+) -> pd.DataFrame:
+    updated = planned_stops
+    for index, (_, row) in enumerate(calculated_positions.reset_index(drop=True).iterrows()):
+        row_with_strategy = row.copy()
+        row_with_strategy["strategy"] = strategies[index] if index < len(strategies) else ""
+        updated = upsert_planned_stop(updated, row_with_strategy)
+    return updated
 
 
 def display_date_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -609,6 +677,10 @@ def render_feedback(message: str, status: str) -> None:
         f'<div class="compact-feedback {escape(status)}">{escape(message)}</div>',
         unsafe_allow_html=True,
     )
+
+
+def render_mode_legend() -> None:
+    render_feedback("Mode: > +0.30R Working | 0 to +0.30R Caution | -0.25R to 0 Weak | < -0.25R Failing", "idle")
 
 
 def format_optional_currency(value) -> str:
@@ -719,6 +791,7 @@ def render_trade_metrics(metrics: dict | None, strategy_metrics: pd.DataFrame | 
         hide_index=True,
         width="stretch",
     )
+    render_mode_legend()
 
 
 config = load_config()
@@ -888,9 +961,9 @@ if visible_calculated.empty:
     render_feedback("No positions yet. Add a valid position from the calculator above to start the list.", "idle")
 else:
     edited = st.data_editor(
-        editor_frame(visible_calculated[PUBLIC_OUTPUT_COLUMNS]),
+        positions_editor_frame(visible_calculated, st.session_state.planned_stops),
         column_config=positions_column_config(),
-        disabled=[column for column in PUBLIC_OUTPUT_COLUMNS if column not in INPUT_COLUMNS],
+        disabled=[column for column in POSITION_EDITOR_COLUMNS if column not in EDITABLE_POSITION_COLUMNS],
         height=positions_editor_height(len(visible_calculated)),
         num_rows="fixed",
         width="stretch",
@@ -898,6 +971,7 @@ else:
         key=position_editor_key,
     )
 
+    strategy_values = edited_position_strategies(edited)
     st.session_state.positions = committed_positions(edited[INPUT_COLUMNS])
     delete_rows = marked_delete_rows(edited)
     if delete_rows:
@@ -905,6 +979,12 @@ else:
 
     save_positions(st.session_state.positions)
     visible_calculated = filtered_output(calculate_positions(st.session_state.positions))
+    st.session_state.planned_stops = upsert_position_strategies(
+        st.session_state.planned_stops,
+        visible_calculated,
+        strategy_values,
+    )
+    save_planned_stops(st.session_state.planned_stops)
     invalid_positions = int((visible_calculated["validation_error"].fillna("") != "").sum())
 
 if invalid_positions:
@@ -950,11 +1030,6 @@ with st.expander("Robinhood Import", expanded=False):
 
     if robinhood_file is None:
         st.session_state.pop("robinhood_import_result", None)
-        render_feedback(
-            f"Upload a Robinhood CSV report to add new transactions to {robinhood_transactions_label()}. "
-            f"Planned stop prices (SL) are read from {planned_stops_label()}.",
-            "idle",
-        )
     else:
         import_result = parse_robinhood_csv(robinhood_file)
         persisted_transactions, added_count = append_robinhood_transactions(
