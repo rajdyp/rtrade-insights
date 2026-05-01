@@ -90,15 +90,15 @@ def test_risk_percent_changes_total_risk_and_shares():
     assert row["position_size"] == 2500
 
 
-def test_calculates_industry_standard_risk_in_atr():
+def test_calculates_risk_in_atr_from_atr_percent():
     result = calculate_positions(
         pd.DataFrame(
             [
                 {
-                    "symbol": "KFRC",
-                    "share_price": 42.51,
-                    "stop_price": 39.40,
-                    "atr": 6.73,
+                    "symbol": "MKSI",
+                    "share_price": 280.44,
+                    "stop_price": 268.00,
+                    "atr": 5.04,
                     "portfolio_amount": 19_250,
                     "risk_percent": 0.12,
                 }
@@ -107,8 +107,9 @@ def test_calculates_industry_standard_risk_in_atr():
     )
 
     row = result.iloc[0]
-    assert row["risk_in_atr"] == 0.46
-    assert row["number_of_shares"] == 7
+    assert row["stop_loss_percent"] == 4.44
+    assert row["risk_in_atr"] == 0.88
+    assert row["number_of_shares"] == 1
 
 
 def test_missing_atr_keeps_position_valid_with_blank_risk_in_atr():

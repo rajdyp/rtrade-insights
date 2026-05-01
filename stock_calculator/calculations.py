@@ -172,13 +172,14 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
         return PositionCalculation(None, None, None, None, hold_count, None, None, "Risk percent must be greater than 0.")
 
     risk_per_share = share_price - stop_price
-    risk_in_atr = round(risk_per_share / atr, 2) if atr is not None and atr > 0 else None
+    stop_loss_percent = round((risk_per_share / share_price) * 100, 2)
+    risk_in_atr = round(stop_loss_percent / atr, 2) if atr is not None and atr > 0 else None
     risk_amount = portfolio_amount * (risk_percent / 100)
     number_of_shares = int(risk_amount // risk_per_share)
 
     if number_of_shares <= 0:
         return PositionCalculation(
-            round((risk_per_share / share_price) * 100, 2),
+            stop_loss_percent,
             risk_in_atr,
             round(risk_amount, 2),
             0,
@@ -191,7 +192,7 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
     position_size = number_of_shares * share_price
 
     return PositionCalculation(
-        stop_loss_percent=round((risk_per_share / share_price) * 100, 2),
+        stop_loss_percent=stop_loss_percent,
         risk_in_atr=risk_in_atr,
         risk_amount=round(risk_amount, 2),
         number_of_shares=number_of_shares,
