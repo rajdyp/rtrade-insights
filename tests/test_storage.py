@@ -31,6 +31,7 @@ def test_save_positions_filters_blank_rows(tmp_path):
                     "buy_date": "2026-04-24",
                     "share_price": 100,
                     "stop_price": 95,
+                    "atr": 2.5,
                     "portfolio_amount": 20_000,
                     "risk_percent": 0.5,
                 },
@@ -43,6 +44,29 @@ def test_save_positions_filters_blank_rows(tmp_path):
 
     assert loaded["symbol"].tolist() == ["KEEP"]
     assert loaded.columns.tolist() == INPUT_COLUMNS
+    assert loaded["atr"].tolist() == [2.5]
+
+
+def test_load_positions_accepts_old_files_without_atr(tmp_path):
+    path = tmp_path / "positions.csv"
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "share_price": 200,
+                "stop_price": 190,
+                "portfolio_amount": 20_000,
+                "risk_percent": 0.5,
+            }
+        ]
+    ).to_csv(path, index=False)
+
+    loaded = load_positions(path)
+
+    assert loaded.columns.tolist() == INPUT_COLUMNS
+    assert loaded["symbol"].tolist() == ["AAPL"]
+    assert loaded["atr"].isna().all()
 
 
 def test_load_positions_returns_empty_frame_for_missing_file(tmp_path):
@@ -77,6 +101,7 @@ def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
                     "quantity": "2",
                     "planned_stop": "190.50",
                     "strategy": "EP",
+                    "atr": "4.25",
                 }
             ]
         ),
@@ -90,6 +115,7 @@ def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
     assert loaded["quantity"].tolist() == [2.0]
     assert loaded["planned_stop"].tolist() == [190.50]
     assert loaded["strategy"].tolist() == ["EP"]
+    assert loaded["atr"].tolist() == [4.25]
 
 
 def test_load_planned_stops_accepts_old_files_without_strategy(tmp_path):
@@ -103,6 +129,18 @@ def test_load_planned_stops_accepts_old_files_without_strategy(tmp_path):
 
     assert loaded.columns.tolist() == PLANNED_STOP_COLUMNS
     assert loaded["strategy"].tolist() == [""]
+
+
+def test_load_planned_stops_accepts_old_files_without_atr(tmp_path):
+    path = tmp_path / "planned_stops.csv"
+    pd.DataFrame(
+        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.50, "strategy": "EP"}]
+    ).to_csv(path, index=False)
+
+    loaded = load_planned_stops(path)
+
+    assert loaded.columns.tolist() == PLANNED_STOP_COLUMNS
+    assert loaded["atr"].isna().all()
 
 
 def test_save_and_load_robinhood_transactions_preserves_cleaned_columns(tmp_path):
@@ -191,13 +229,14 @@ def test_upsert_planned_stop_records_calculated_entry_stop():
             "number_of_shares": 2,
             "stop_price": 190.5,
             "strategy": "BO",
+            "atr": 4.25,
         }
     )
 
     result = upsert_planned_stop(planned_stops, calculated_position)
 
     assert result.to_dict("records") == [
-        {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.5, "strategy": "BO"}
+        {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.5, "strategy": "BO", "atr": 4.25}
     ]
 
 
@@ -209,7 +248,7 @@ def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
         ]
     )
     planned_stops = pd.DataFrame(
-        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 1, "planned_stop": 95, "strategy": "EP"}],
+        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 1, "planned_stop": 95, "strategy": "EP", "atr": 2.5}],
         columns=PLANNED_STOP_COLUMNS,
     )
 
@@ -217,6 +256,7 @@ def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
 
     assert result.closed_trades.iloc[0]["planned_stop"] == 95
     assert result.closed_trades.iloc[0]["strategy"] == "EP"
+    assert result.closed_trades.iloc[0]["atr"] == 2.5
     assert result.missing_planned_stops == 0
 
 
@@ -267,7 +307,7 @@ def test_google_sheets_save_writes_headers_and_normalized_rows():
 
     assert worksheet.values == [
         PLANNED_STOP_COLUMNS,
-        ["AAPL", "2026-04-01", 2.0, 190.5, "EP"],
+        ["AAPL", "2026-04-01", 2.0, 190.5, "EP", ""],
     ]
 
 
@@ -320,6 +360,7 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
             "number_of_shares": 2,
             "stop_price": 190.5,
             "strategy": "5% BO",
+            "atr": 4.25,
         }
     )
 
@@ -328,7 +369,7 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
 
     assert worksheet.values == [
         PLANNED_STOP_COLUMNS,
-        ["AAPL", "2026-04-01", 2, 190.5, "5% BO"],
+        ["AAPL", "2026-04-01", 2, 190.5, "5% BO", 4.25],
     ]
 
 

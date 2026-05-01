@@ -68,6 +68,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
                 "quantity": 7,
                 "planned_stop": 58.25,
                 "strategy": "EP",
+                "atr": 4.5,
             }
         ],
         columns=PLANNED_STOP_COLUMNS,
@@ -78,12 +79,36 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
     row = result.closed_trades.iloc[0]
     assert row["planned_stop"] == 58.25
     assert row["strategy"] == "EP"
+    assert row["atr"] == 4.5
     assert row["buy_price"] == 63.84
     assert row["sell_price"] == 60.90
     assert row["realized_pnl"] == -20.58
     assert row["realized_pnl_percent"] == -4.61
     assert result.open_lots.empty
     assert result.missing_planned_stops == 0
+
+
+def test_derive_fifo_trades_carries_planned_atr_into_closed_trades_and_open_lots():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 10, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "AAPL", "trans_code": "Buy", "quantity": 5, "price": 101},
+            {"activity_date": "2026-04-03", "symbol": "AAPL", "trans_code": "Sell", "quantity": 10, "price": 95},
+        ]
+    )
+    planned = pd.DataFrame(
+        [
+            {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 10, "planned_stop": 96, "strategy": "EP", "atr": 2.5},
+            {"symbol": "AAPL", "buy_date": "2026-04-02", "quantity": 5, "planned_stop": 97, "strategy": "BO", "atr": 3.5},
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+
+    assert result.closed_trades.iloc[0]["atr"] == 2.5
+    assert result.exit_matches.iloc[0]["atr"] == 2.5
+    assert result.open_lots.iloc[0]["atr"] == 3.5
 
 
 def test_derive_fifo_trades_supports_partial_sells_and_open_lots():
