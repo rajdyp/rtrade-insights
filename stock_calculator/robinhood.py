@@ -65,7 +65,7 @@ CLOSED_TRADE_COLUMNS = [
     "hold_days",
 ]
 
-OPEN_POSITION_COLUMNS = [
+OPEN_LOT_COLUMNS = [
     "symbol",
     "buy_date",
     "quantity",
@@ -108,7 +108,8 @@ class ImportResult:
 @dataclass(frozen=True)
 class TradeDerivation:
     closed_trades: pd.DataFrame
-    open_positions: pd.DataFrame
+    exit_matches: pd.DataFrame
+    open_lots: pd.DataFrame
     unmatched_sells: pd.DataFrame
     missing_planned_stops: int
 
@@ -357,12 +358,19 @@ def derive_fifo_trades(
     as_of: date | None = None,
 ) -> TradeDerivation:
     if transactions.empty:
-        return TradeDerivation(_empty_closed_trades(), _empty_open_positions(), _empty_unmatched_sells(), 0)
+        return TradeDerivation(
+            _empty_closed_trades(),
+            _empty_closed_trades(),
+            _empty_open_lots(),
+            _empty_unmatched_sells(),
+            0,
+        )
 
     planned_stop_lookup = _planned_stop_lookup(planned_stops)
     normalized = _normalize_transactions(transactions)
     lots: defaultdict[str, deque[dict[str, Any]]] = defaultdict(deque)
     closed_trades: list[dict[str, Any]] = []
+    exit_matches: list[dict[str, Any]] = []
     unmatched_sells: list[dict[str, Any]] = []
 
     for _, row in normalized.iterrows():
@@ -375,7 +383,9 @@ def derive_fifo_trades(
                     "symbol": symbol,
                     "buy_date": buy_date,
                     "quantity": quantity,
+                    "original_quantity": quantity,
                     "buy_price": float(row["price"]),
+                    "exit_matches": [],
                     **planned_stop_lookup.get(
                         (symbol, buy_date, _quantity_key(quantity)),
                         {"planned_stop": None, "strategy": ""},
@@ -396,27 +406,28 @@ def derive_fifo_trades(
             realized_pnl = round(sell_amount - buy_amount, 2)
             realized_pnl_percent = round((realized_pnl / buy_amount) * 100, 2) if buy_amount else None
 
-            closed_trades.append(
-                {
-                    "symbol": symbol,
-                    "buy_date": lot["buy_date"],
-                    "sell_date": sell_date,
-                    "quantity": _clean_quantity(matched_quantity),
-                    "planned_stop": lot["planned_stop"],
-                    "strategy": lot["strategy"],
-                    "buy_price": buy_price,
-                    "buy_amount": buy_amount,
-                    "sell_price": sell_price,
-                    "sell_amount": sell_amount,
-                    "realized_pnl": realized_pnl,
-                    "realized_pnl_percent": realized_pnl_percent,
-                    "hold_days": weekday_hold_count(lot["buy_date"], as_of=_to_date(sell_date)),
-                }
-            )
+            exit_match = {
+                "symbol": symbol,
+                "buy_date": lot["buy_date"],
+                "sell_date": sell_date,
+                "quantity": _clean_quantity(matched_quantity),
+                "planned_stop": lot["planned_stop"],
+                "strategy": lot["strategy"],
+                "buy_price": buy_price,
+                "buy_amount": buy_amount,
+                "sell_price": sell_price,
+                "sell_amount": sell_amount,
+                "realized_pnl": realized_pnl,
+                "realized_pnl_percent": realized_pnl_percent,
+                "hold_days": weekday_hold_count(lot["buy_date"], as_of=_to_date(sell_date)),
+            }
+            exit_matches.append(exit_match)
+            lot["exit_matches"].append(exit_match)
 
             lot["quantity"] -= matched_quantity
             remaining_quantity -= matched_quantity
             if lot["quantity"] <= 1e-9:
+                closed_trades.append(_aggregate_closed_trade(lot))
                 lots[symbol].popleft()
 
         if remaining_quantity > 1e-9:
@@ -429,13 +440,13 @@ def derive_fifo_trades(
                 }
             )
 
-    open_positions = []
+    open_lots = []
     for symbol in sorted(lots):
         for lot in lots[symbol]:
             if lot["quantity"] <= 1e-9:
                 continue
             quantity = _clean_quantity(lot["quantity"])
-            open_positions.append(
+            open_lots.append(
                 {
                     "symbol": symbol,
                     "buy_date": lot["buy_date"],
@@ -449,11 +460,39 @@ def derive_fifo_trades(
             )
 
     closed_frame = pd.DataFrame(closed_trades, columns=CLOSED_TRADE_COLUMNS)
-    open_frame = pd.DataFrame(open_positions, columns=OPEN_POSITION_COLUMNS)
+    exit_match_frame = pd.DataFrame(exit_matches, columns=CLOSED_TRADE_COLUMNS)
+    open_frame = pd.DataFrame(open_lots, columns=OPEN_LOT_COLUMNS)
     unmatched_frame = pd.DataFrame(unmatched_sells, columns=UNMATCHED_SELL_COLUMNS)
     missing_planned_stops = _missing_stop_count(closed_frame) + _missing_stop_count(open_frame)
 
-    return TradeDerivation(closed_frame, open_frame, unmatched_frame, missing_planned_stops)
+    return TradeDerivation(closed_frame, exit_match_frame, open_frame, unmatched_frame, missing_planned_stops)
+
+
+def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
+    matches = lot["exit_matches"]
+    quantity = sum(float(match["quantity"]) for match in matches)
+    buy_amount = round(sum(float(match["buy_amount"]) for match in matches), 2)
+    sell_amount = round(sum(float(match["sell_amount"]) for match in matches), 2)
+    realized_pnl = round(sell_amount - buy_amount, 2)
+    realized_pnl_percent = round((realized_pnl / buy_amount) * 100, 2) if buy_amount else None
+    sell_price = round(sell_amount / quantity, 2) if quantity else None
+    sell_date = max(str(match["sell_date"]) for match in matches)
+
+    return {
+        "symbol": lot["symbol"],
+        "buy_date": lot["buy_date"],
+        "sell_date": sell_date,
+        "quantity": _clean_quantity(quantity),
+        "planned_stop": lot["planned_stop"],
+        "strategy": lot["strategy"],
+        "buy_price": float(lot["buy_price"]),
+        "buy_amount": buy_amount,
+        "sell_price": sell_price,
+        "sell_amount": sell_amount,
+        "realized_pnl": realized_pnl,
+        "realized_pnl_percent": realized_pnl_percent,
+        "hold_days": weekday_hold_count(lot["buy_date"], as_of=_to_date(sell_date)),
+    }
 
 
 def _read_csv_rows(source: str | Path | TextIO | Any) -> list[list[str]]:
@@ -653,8 +692,8 @@ def _empty_closed_trades() -> pd.DataFrame:
     return pd.DataFrame(columns=CLOSED_TRADE_COLUMNS)
 
 
-def _empty_open_positions() -> pd.DataFrame:
-    return pd.DataFrame(columns=OPEN_POSITION_COLUMNS)
+def _empty_open_lots() -> pd.DataFrame:
+    return pd.DataFrame(columns=OPEN_LOT_COLUMNS)
 
 
 def _empty_unmatched_sells() -> pd.DataFrame:

@@ -525,7 +525,7 @@ def closed_trades_column_config() -> dict:
     }
 
 
-def open_positions_column_config() -> dict:
+def open_lots_column_config() -> dict:
     return {
         "symbol": st.column_config.TextColumn("Symbol", width=84),
         "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=108),
@@ -1063,7 +1063,7 @@ with st.expander("Robinhood Import", expanded=False):
     latest_added_rows = st.session_state.get("robinhood_last_added_count", 0) if imported_result is not None else 0
     latest_skipped_rows = st.session_state.get("robinhood_last_skipped_count", 0) if imported_result is not None else 0
 
-    import_summary_cols = st.columns(9)
+    import_summary_cols = st.columns(10)
     import_summary_cols[0].metric("Upload Rows", current_trade_rows)
     import_summary_cols[1].metric("New Rows", latest_added_rows)
     import_summary_cols[2].metric("Skipped Rows", latest_skipped_rows)
@@ -1071,8 +1071,9 @@ with st.expander("Robinhood Import", expanded=False):
     import_summary_cols[4].metric("Malformed Rows", current_malformed_rows)
     import_summary_cols[5].metric("Stored Rows", len(st.session_state.robinhood_transactions))
     import_summary_cols[6].metric("Closed Trades", len(robinhood_derivation.closed_trades))
-    import_summary_cols[7].metric("Open Positions", len(robinhood_derivation.open_positions))
-    import_summary_cols[8].metric("Missing Stops", robinhood_derivation.missing_planned_stops)
+    import_summary_cols[7].metric("Exit Matches", len(robinhood_derivation.exit_matches))
+    import_summary_cols[8].metric("Open Lots", len(robinhood_derivation.open_lots))
+    import_summary_cols[9].metric("Missing Stops", robinhood_derivation.missing_planned_stops)
 
     if robinhood_derivation.missing_planned_stops:
         render_feedback(
@@ -1090,8 +1091,8 @@ with st.expander("Robinhood Import", expanded=False):
         if issue_parts:
             render_feedback("Import issues found: " + ", ".join(issue_parts) + ".", "error")
 
-    closed_tab, open_tab, issues_tab, raw_tab = st.tabs(
-        ["Closed Trades", "Open Positions", "Import Issues", "Clean Transactions"]
+    closed_tab, exit_match_tab, open_tab, issues_tab, raw_tab = st.tabs(
+        ["Closed Trades", "Exit Matches", "Open Lots", "Import Issues", "Clean Transactions"]
     )
 
     with closed_tab:
@@ -1106,13 +1107,25 @@ with st.expander("Robinhood Import", expanded=False):
                 width="stretch",
             )
 
-    with open_tab:
-        if robinhood_derivation.open_positions.empty:
-            render_feedback("No open imported positions remain after FIFO matching.", "idle")
+    with exit_match_tab:
+        if robinhood_derivation.exit_matches.empty:
+            render_feedback("No FIFO exit matches were derived from stored Robinhood transactions.", "idle")
         else:
             st.dataframe(
-                display_date_frame(robinhood_derivation.open_positions),
-                column_config=open_positions_column_config(),
+                display_date_frame(robinhood_derivation.exit_matches),
+                column_config=closed_trades_column_config(),
+                height=robinhood_dataframe_height(len(robinhood_derivation.exit_matches)),
+                hide_index=True,
+                width="stretch",
+            )
+
+    with open_tab:
+        if robinhood_derivation.open_lots.empty:
+            render_feedback("No open imported lots remain after FIFO matching.", "idle")
+        else:
+            st.dataframe(
+                display_date_frame(robinhood_derivation.open_lots),
+                column_config=open_lots_column_config(),
                 hide_index=True,
                 width="stretch",
             )
