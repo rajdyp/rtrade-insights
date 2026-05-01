@@ -82,7 +82,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
     assert row["sell_price"] == 60.90
     assert row["realized_pnl"] == -20.58
     assert row["realized_pnl_percent"] == -4.61
-    assert result.open_positions.empty
+    assert result.open_lots.empty
     assert result.missing_planned_stops == 0
 
 
@@ -97,11 +97,59 @@ def test_derive_fifo_trades_supports_partial_sells_and_open_lots():
 
     result = derive_fifo_trades(transactions, pd.DataFrame())
 
-    assert result.closed_trades["quantity"].tolist() == [4, 2]
-    assert result.closed_trades["buy_price"].tolist() == [59.78, 59.38]
-    assert result.open_positions.iloc[0]["quantity"] == 2
-    assert result.open_positions.iloc[0]["buy_price"] == 59.38
-    assert result.missing_planned_stops == 3
+    assert result.exit_matches["quantity"].tolist() == [4, 2]
+    assert result.exit_matches["buy_price"].tolist() == [59.78, 59.38]
+    assert result.closed_trades["quantity"].tolist() == [4]
+    assert result.open_lots.iloc[0]["quantity"] == 2
+    assert result.open_lots.iloc[0]["buy_price"] == 59.38
+    assert result.missing_planned_stops == 2
+
+
+def test_derive_fifo_trades_aggregates_split_exits_into_one_closed_trade():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 10, "price": 100},
+            {"activity_date": "2026-04-03", "symbol": "AAPL", "trans_code": "Sell", "quantity": 5, "price": 110},
+            {"activity_date": "2026-04-06", "symbol": "AAPL", "trans_code": "Sell", "quantity": 5, "price": 90},
+        ]
+    )
+    planned = pd.DataFrame(
+        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 10, "planned_stop": 95, "strategy": "EP"}],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+    metrics = calculate_trade_metrics(result.closed_trades)
+
+    assert len(result.exit_matches) == 2
+    assert len(result.closed_trades) == 1
+    row = result.closed_trades.iloc[0]
+    assert row["quantity"] == 10
+    assert row["buy_amount"] == 1000
+    assert row["sell_amount"] == 1000
+    assert row["realized_pnl"] == 0
+    assert row["realized_pnl_percent"] == 0
+    assert row["sell_price"] == 100
+    assert row["sell_date"] == "2026-04-06"
+    assert row["hold_days"] == 3
+    assert row["strategy"] == "EP"
+    assert metrics["trade_count"] == 1
+    assert metrics["breakeven_count"] == 1
+
+
+def test_derive_fifo_trades_excludes_partially_open_lots_from_closed_trades():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 10, "price": 100},
+            {"activity_date": "2026-04-03", "symbol": "AAPL", "trans_code": "Sell", "quantity": 5, "price": 110},
+        ]
+    )
+
+    result = derive_fifo_trades(transactions, pd.DataFrame())
+
+    assert len(result.exit_matches) == 1
+    assert result.closed_trades.empty
+    assert result.open_lots.iloc[0]["quantity"] == 5
 
 
 def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
@@ -124,6 +172,8 @@ def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
 
     assert result.closed_trades["planned_stop"].tolist() == [56.75, 55.25]
     assert result.closed_trades["strategy"].tolist() == ["BO", "5% BO"]
+    assert result.exit_matches["planned_stop"].tolist() == [56.75, 55.25]
+    assert result.exit_matches["strategy"].tolist() == ["BO", "5% BO"]
     assert result.missing_planned_stops == 0
 
 
@@ -229,11 +279,11 @@ def test_derive_fifo_trades_calculates_open_hold_days():
 
     result = derive_fifo_trades(transactions, pd.DataFrame(), as_of=date(2026, 4, 20))
 
-    assert result.open_positions.iloc[0]["cost_basis"] == 357.12
-    assert result.open_positions.iloc[0]["hold_days"] == 3
+    assert result.open_lots.iloc[0]["cost_basis"] == 357.12
+    assert result.open_lots.iloc[0]["hold_days"] == 3
 
 
-def test_derive_fifo_trades_copies_strategy_to_open_positions():
+def test_derive_fifo_trades_copies_strategy_to_open_lots():
     transactions = pd.DataFrame(
         [
             {"activity_date": "2026-04-15", "symbol": "IONQ", "trans_code": "Buy", "quantity": 9, "price": 39.68},
@@ -246,7 +296,7 @@ def test_derive_fifo_trades_copies_strategy_to_open_positions():
 
     result = derive_fifo_trades(transactions, planned)
 
-    assert result.open_positions.iloc[0]["strategy"] == "5% BO"
+    assert result.open_lots.iloc[0]["strategy"] == "5% BO"
 
 
 def test_calculate_trade_metrics_from_closed_trades():
