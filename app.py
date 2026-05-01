@@ -492,7 +492,7 @@ def positions_column_config() -> dict:
         "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=96),
         "share_price": st.column_config.NumberColumn("Share Price", format="$%.2f", width=94),
         "stop_price": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=88),
-        "atr": st.column_config.NumberColumn("ATR", format="%.2f", width=58),
+        "atr": st.column_config.NumberColumn("ATR %", format="%.2f", width=58),
         "risk_in_atr": st.column_config.NumberColumn("Risk (ATR)", format="%.2f", width=82),
         "strategy": st.column_config.SelectboxColumn(
             "Strategy",
@@ -896,7 +896,7 @@ symbol = top_cols[0].text_input("Symbol", key="draft_symbol").upper().strip()
 buy_date = top_cols[1].date_input("Buy Date", key="draft_buy_date")
 share_price = top_cols[2].number_input("Share Price", min_value=0.0, step=0.01, format="%.2f", key="draft_share_price")
 stop_price = top_cols[3].number_input("Stop Price", min_value=0.0, step=0.01, format="%.2f", key="draft_stop_price")
-atr = top_cols[4].number_input("ATR", min_value=0.0, step=0.01, format="%.2f", key="draft_atr")
+atr = top_cols[4].number_input("ATR %", min_value=0.0, step=0.01, format="%.2f", key="draft_atr")
 portfolio_amount = top_cols[5].number_input(
     "Portfolio",
     min_value=0.0,
