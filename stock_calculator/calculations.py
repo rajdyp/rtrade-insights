@@ -12,6 +12,7 @@ INPUT_COLUMNS = [
     "buy_date",
     "share_price",
     "stop_price",
+    "atr",
     "portfolio_amount",
     "risk_percent",
 ]
@@ -19,6 +20,7 @@ INPUT_COLUMNS = [
 OUTPUT_COLUMNS = [
     *INPUT_COLUMNS,
     "stop_loss_percent",
+    "risk_in_atr",
     "risk_amount",
     "number_of_shares",
     "hold_count",
@@ -32,6 +34,8 @@ PUBLIC_OUTPUT_COLUMNS = [
     "buy_date",
     "share_price",
     "stop_price",
+    "atr",
+    "risk_in_atr",
     "stop_loss_percent",
     "number_of_shares",
     "sell_lot",
@@ -46,6 +50,7 @@ PUBLIC_OUTPUT_COLUMNS = [
 @dataclass(frozen=True)
 class PositionCalculation:
     stop_loss_percent: float | None
+    risk_in_atr: float | None
     risk_amount: float | None
     number_of_shares: int | None
     hold_count: int | None
@@ -63,6 +68,7 @@ def empty_positions(rows: int = 8) -> pd.DataFrame:
                 "buy_date": today,
                 "share_price": None,
                 "stop_price": None,
+                "atr": None,
                 "portfolio_amount": 20_000.0,
                 "risk_percent": 0.50,
             }
@@ -82,7 +88,7 @@ def normalize_input_frame(df: pd.DataFrame) -> pd.DataFrame:
     normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
     normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
 
-    for column in ["share_price", "stop_price", "portfolio_amount", "risk_percent"]:
+    for column in ["share_price", "stop_price", "atr", "portfolio_amount", "risk_percent"]:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
     return normalized
@@ -111,6 +117,7 @@ def draft_position(
     stop_price: float | None,
     portfolio_amount: float | None,
     risk_percent: float | None,
+    atr: float | None = None,
 ) -> pd.DataFrame:
     return normalize_input_frame(
         pd.DataFrame(
@@ -120,6 +127,7 @@ def draft_position(
                     "buy_date": buy_date,
                     "share_price": share_price,
                     "stop_price": stop_price,
+                    "atr": atr,
                     "portfolio_amount": portfolio_amount,
                     "risk_percent": risk_percent,
                 }
@@ -145,30 +153,33 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
     symbol = str(row.get("symbol") or "").strip()
     share_price = _to_float(row.get("share_price"))
     stop_price = _to_float(row.get("stop_price"))
+    atr = _to_float(row.get("atr"))
     portfolio_amount = _to_float(row.get("portfolio_amount"))
     risk_percent = _to_float(row.get("risk_percent"))
     hold_count = weekday_hold_count(row.get("buy_date"), as_of=as_of)
 
     if not symbol:
-        return PositionCalculation(None, None, None, None, None, None, "")
+        return PositionCalculation(None, None, None, None, None, None, None, "")
     if share_price is None or share_price <= 0:
-        return PositionCalculation(None, None, None, hold_count, None, None, "Share price must be greater than 0.")
+        return PositionCalculation(None, None, None, None, hold_count, None, None, "Share price must be greater than 0.")
     if stop_price is None or stop_price <= 0:
-        return PositionCalculation(None, None, None, hold_count, None, None, "Stop price must be greater than 0.")
+        return PositionCalculation(None, None, None, None, hold_count, None, None, "Stop price must be greater than 0.")
     if stop_price >= share_price:
-        return PositionCalculation(None, None, None, hold_count, None, None, "Stop price must be below share price.")
+        return PositionCalculation(None, None, None, None, hold_count, None, None, "Stop price must be below share price.")
     if portfolio_amount is None or portfolio_amount <= 0:
-        return PositionCalculation(None, None, None, hold_count, None, None, "Portfolio amount must be greater than 0.")
+        return PositionCalculation(None, None, None, None, hold_count, None, None, "Portfolio amount must be greater than 0.")
     if risk_percent is None or risk_percent <= 0:
-        return PositionCalculation(None, None, None, hold_count, None, None, "Risk percent must be greater than 0.")
+        return PositionCalculation(None, None, None, None, hold_count, None, None, "Risk percent must be greater than 0.")
 
     risk_per_share = share_price - stop_price
+    risk_in_atr = round(risk_per_share / atr, 2) if atr is not None and atr > 0 else None
     risk_amount = portfolio_amount * (risk_percent / 100)
     number_of_shares = int(risk_amount // risk_per_share)
 
     if number_of_shares <= 0:
         return PositionCalculation(
             round((risk_per_share / share_price) * 100, 2),
+            risk_in_atr,
             round(risk_amount, 2),
             0,
             hold_count,
@@ -181,6 +192,7 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
 
     return PositionCalculation(
         stop_loss_percent=round((risk_per_share / share_price) * 100, 2),
+        risk_in_atr=risk_in_atr,
         risk_amount=round(risk_amount, 2),
         number_of_shares=number_of_shares,
         hold_count=hold_count,

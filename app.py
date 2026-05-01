@@ -54,6 +54,8 @@ POSITION_EDITOR_COLUMNS = [
     "buy_date",
     "share_price",
     "stop_price",
+    "atr",
+    "risk_in_atr",
     "strategy",
     "stop_loss_percent",
     "number_of_shares",
@@ -486,24 +488,26 @@ def apply_styles() -> None:
 
 def positions_column_config() -> dict:
     return {
-        "symbol": st.column_config.TextColumn("Symbol", width=84),
-        "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=108),
-        "share_price": st.column_config.NumberColumn("Share Price", format="$%.2f", width=110),
-        "stop_price": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
+        "symbol": st.column_config.TextColumn("Symbol", width=72),
+        "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=96),
+        "share_price": st.column_config.NumberColumn("Share Price", format="$%.2f", width=94),
+        "stop_price": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=88),
+        "atr": st.column_config.NumberColumn("ATR", format="%.2f", width=58),
+        "risk_in_atr": st.column_config.NumberColumn("Risk (ATR)", format="%.2f", width=82),
         "strategy": st.column_config.SelectboxColumn(
             "Strategy",
             options=[*STRATEGY_OPTIONS, UNCLASSIFIED_STRATEGY],
-            width=90,
+            width=82,
         ),
-        "stop_loss_percent": st.column_config.NumberColumn("Stop Loss", format="%.2f%%", width=86),
-        "number_of_shares": st.column_config.NumberColumn("Shares", width=78),
-        "sell_lot": st.column_config.NumberColumn("Sell Lot", width=78),
-        "hold_count": st.column_config.NumberColumn("Hold Days", width=84),
-        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=126),
-        "risk_percent": st.column_config.NumberColumn("Risk %", format="%.2f%%", width=82),
-        "risk_amount": st.column_config.NumberColumn("Total Risk", format="$%.2f", width=116),
-        "portfolio_amount": st.column_config.NumberColumn("Portfolio", format="$%.2f", width=126),
-        DELETE_COLUMN: st.column_config.CheckboxColumn("x", width=44, default=False),
+        "stop_loss_percent": st.column_config.NumberColumn("Stop Loss", format="%.2f%%", width=78),
+        "number_of_shares": st.column_config.NumberColumn("Shares", width=68),
+        "sell_lot": st.column_config.NumberColumn("Sell Lot", width=68),
+        "hold_count": st.column_config.NumberColumn("Hold Days", width=74),
+        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=104),
+        "risk_percent": st.column_config.NumberColumn("Risk %", format="%.2f%%", width=72),
+        "risk_amount": st.column_config.NumberColumn("Total Risk", format="$%.2f", width=96),
+        "portfolio_amount": st.column_config.NumberColumn("Portfolio", format="$%.2f", width=104),
+        DELETE_COLUMN: st.column_config.CheckboxColumn("x", width=38, default=False),
     }
 
 
@@ -515,6 +519,7 @@ def closed_trades_column_config() -> dict:
         "quantity": st.column_config.NumberColumn("Quantity", width=86),
         "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
         "strategy": st.column_config.TextColumn("Strategy", width=90),
+        "atr": st.column_config.NumberColumn("ATR", format="%.2f", width=74),
         "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=104),
         "buy_amount": st.column_config.NumberColumn("Buy Amount", format="$%.2f", width=116),
         "sell_price": st.column_config.NumberColumn("Sell Price", format="$%.2f", width=104),
@@ -532,6 +537,7 @@ def open_lots_column_config() -> dict:
         "quantity": st.column_config.NumberColumn("Quantity", width=86),
         "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
         "strategy": st.column_config.TextColumn("Strategy", width=90),
+        "atr": st.column_config.NumberColumn("ATR", format="%.2f", width=74),
         "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=104),
         "cost_basis": st.column_config.NumberColumn("Cost Basis", format="$%.2f", width=116),
         "hold_days": st.column_config.NumberColumn("Hold Days", width=88),
@@ -701,6 +707,12 @@ def format_optional_number(value) -> str:
     return f"{float(value):.2f}"
 
 
+def format_blank_optional_number(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return f"{float(value):.2f}"
+
+
 def format_optional_days(value) -> str:
     if value is None or pd.isna(value):
         return "N/A"
@@ -809,6 +821,7 @@ def add_current_draft() -> None:
         buy_date=st.session_state.get("draft_buy_date"),
         share_price=st.session_state.get("draft_share_price"),
         stop_price=st.session_state.get("draft_stop_price"),
+        atr=st.session_state.get("draft_atr"),
         portfolio_amount=st.session_state.get("draft_portfolio_amount"),
         risk_percent=st.session_state.get("draft_risk_percent"),
     )
@@ -826,6 +839,7 @@ def add_current_draft() -> None:
     st.session_state.draft_buy_date = date.today()
     st.session_state.draft_share_price = 0.0
     st.session_state.draft_stop_price = 0.0
+    st.session_state.draft_atr = 0.0
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
     st.session_state.draft_risk_percent = config.risk_percent
     st.session_state.draft_strategy = STRATEGY_OPTIONS[0]
@@ -855,6 +869,8 @@ if "draft_share_price" not in st.session_state:
     st.session_state.draft_share_price = 0.0
 if "draft_stop_price" not in st.session_state:
     st.session_state.draft_stop_price = 0.0
+if "draft_atr" not in st.session_state:
+    st.session_state.draft_atr = 0.0
 if "draft_portfolio_amount" not in st.session_state:
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
 if "draft_risk_percent" not in st.session_state:
@@ -875,32 +891,34 @@ render_header(total_pnl, trade_metrics, header_container)
 
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
-top_cols = st.columns([1.2, 1, 1, 1, 1, 0.8, 0.9])
+top_cols = st.columns([1.2, 1, 1, 1, 0.8, 1, 0.8, 0.9])
 symbol = top_cols[0].text_input("Symbol", key="draft_symbol").upper().strip()
 buy_date = top_cols[1].date_input("Buy Date", key="draft_buy_date")
 share_price = top_cols[2].number_input("Share Price", min_value=0.0, step=0.01, format="%.2f", key="draft_share_price")
 stop_price = top_cols[3].number_input("Stop Price", min_value=0.0, step=0.01, format="%.2f", key="draft_stop_price")
-portfolio_amount = top_cols[4].number_input(
+atr = top_cols[4].number_input("ATR", min_value=0.0, step=0.01, format="%.2f", key="draft_atr")
+portfolio_amount = top_cols[5].number_input(
     "Portfolio",
     min_value=0.0,
     step=100.0,
     format="%.2f",
     key="draft_portfolio_amount",
 )
-risk_percent = top_cols[5].number_input(
+risk_percent = top_cols[6].number_input(
     "Risk %",
     min_value=0.0,
     step=0.05,
     format="%.2f",
     key="draft_risk_percent",
 )
-top_cols[6].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
+top_cols[7].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
 
 draft = draft_position(
     symbol=symbol,
     buy_date=buy_date,
     share_price=share_price,
     stop_price=stop_price,
+    atr=atr,
     portfolio_amount=portfolio_amount,
     risk_percent=risk_percent,
 )
@@ -909,11 +927,12 @@ draft_row = draft_result.iloc[0]
 draft_error = str(draft_row["validation_error"] or "")
 draft_is_valid = bool(symbol) and not draft_error
 
-preview_cols = st.columns(4)
+preview_cols = st.columns(5)
 preview_cols[0].metric("Stop Loss", format_percent(first_value(draft_result, "stop_loss_percent")))
-preview_cols[1].metric("Shares", "" if pd.isna(draft_row["number_of_shares"]) else int(draft_row["number_of_shares"]))
-preview_cols[2].metric("Position Size", format_currency(first_value(draft_result, "position_size")))
-preview_cols[3].metric("Total Risk", format_currency(first_value(draft_result, "risk_amount")))
+preview_cols[1].metric("Risk in ATR", format_blank_optional_number(first_value(draft_result, "risk_in_atr")))
+preview_cols[2].metric("Shares", "" if pd.isna(draft_row["number_of_shares"]) else int(draft_row["number_of_shares"]))
+preview_cols[3].metric("Position Size", format_currency(first_value(draft_result, "position_size")))
+preview_cols[4].metric("Total Risk", format_currency(first_value(draft_result, "risk_amount")))
 
 if draft_error:
     feedback_message = draft_error
@@ -994,29 +1013,6 @@ if invalid_positions:
         for index, row in invalid_rows.iterrows()
     ]
     render_feedback("Some rows need fixes before their calculated values can be used: " + "; ".join(messages), "error")
-
-with st.expander("Quip-style summary"):
-    if visible_calculated.empty:
-        render_feedback("Add one or more symbols to see the summary.", "idle")
-    else:
-        summary = pd.DataFrame(
-            {
-                row["symbol"]: {
-                    "Buy Date": row["buy_date"],
-                    "Share Price": format_currency(row["share_price"]),
-                    "Stop Price": format_currency(row["stop_price"]),
-                    "Stop Loss": format_percent(row["stop_loss_percent"]),
-                    "No of Shares": "" if pd.isna(row["number_of_shares"]) else str(int(row["number_of_shares"])),
-                    "Hold Count": "" if pd.isna(row["hold_count"]) else str(int(row["hold_count"])),
-                    "Sell Lot": "" if pd.isna(row["sell_lot"]) else str(int(row["sell_lot"])),
-                    "Position Size": format_currency(row["position_size"]),
-                    "Risk %": format_percent(row["risk_percent"]),
-                    "Total Risk": format_currency(row["risk_amount"]),
-                }
-                for _, row in visible_calculated.iterrows()
-            }
-        )
-        st.dataframe(summary, width="stretch")
 
 trade_metrics_container = st.container()
 

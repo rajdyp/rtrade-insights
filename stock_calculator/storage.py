@@ -317,6 +317,7 @@ def generate_planned_stops_from_transactions(transactions: pd.DataFrame) -> pd.D
             "quantity": row["quantity"],
             "planned_stop": None,
             "strategy": "",
+            "atr": None,
         }
         for _, row in buys.iterrows()
     ]
@@ -385,6 +386,7 @@ def _normalize_planned_stops(df: pd.DataFrame) -> pd.DataFrame:
     normalized["quantity"] = pd.to_numeric(normalized["quantity"], errors="coerce")
     normalized["planned_stop"] = pd.to_numeric(normalized["planned_stop"], errors="coerce")
     normalized["strategy"] = normalized["strategy"].apply(normalize_strategy)
+    normalized["atr"] = pd.to_numeric(normalized["atr"], errors="coerce")
 
     return normalized[normalized["symbol"] != ""].reset_index(drop=True)
 
@@ -406,6 +408,7 @@ def _planned_stop_from_calculated_position(row: pd.Series) -> dict[str, object] 
         "quantity": quantity,
         "planned_stop": planned_stop,
         "strategy": normalize_strategy(row.get("strategy")),
+        "atr": pd.to_numeric(row.get("atr"), errors="coerce"),
     }
 
 

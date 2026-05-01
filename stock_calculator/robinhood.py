@@ -47,6 +47,7 @@ PLANNED_STOP_COLUMNS = [
     "quantity",
     "planned_stop",
     "strategy",
+    "atr",
 ]
 
 CLOSED_TRADE_COLUMNS = [
@@ -56,6 +57,7 @@ CLOSED_TRADE_COLUMNS = [
     "quantity",
     "planned_stop",
     "strategy",
+    "atr",
     "buy_price",
     "buy_amount",
     "sell_price",
@@ -71,6 +73,7 @@ OPEN_LOT_COLUMNS = [
     "quantity",
     "planned_stop",
     "strategy",
+    "atr",
     "buy_price",
     "cost_basis",
     "hold_days",
@@ -388,7 +391,7 @@ def derive_fifo_trades(
                     "exit_matches": [],
                     **planned_stop_lookup.get(
                         (symbol, buy_date, _quantity_key(quantity)),
-                        {"planned_stop": None, "strategy": ""},
+                        {"planned_stop": None, "strategy": "", "atr": None},
                     ),
                 }
             )
@@ -413,6 +416,7 @@ def derive_fifo_trades(
                 "quantity": _clean_quantity(matched_quantity),
                 "planned_stop": lot["planned_stop"],
                 "strategy": lot["strategy"],
+                "atr": lot["atr"],
                 "buy_price": buy_price,
                 "buy_amount": buy_amount,
                 "sell_price": sell_price,
@@ -453,6 +457,7 @@ def derive_fifo_trades(
                     "quantity": quantity,
                     "planned_stop": lot["planned_stop"],
                     "strategy": lot["strategy"],
+                    "atr": lot["atr"],
                     "buy_price": float(lot["buy_price"]),
                     "cost_basis": round(float(lot["quantity"]) * float(lot["buy_price"]), 2),
                     "hold_days": weekday_hold_count(lot["buy_date"], as_of=as_of),
@@ -485,6 +490,7 @@ def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
         "quantity": _clean_quantity(quantity),
         "planned_stop": lot["planned_stop"],
         "strategy": lot["strategy"],
+        "atr": lot["atr"],
         "buy_price": float(lot["buy_price"]),
         "buy_amount": buy_amount,
         "sell_price": sell_price,
@@ -544,6 +550,7 @@ def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, 
 
     stops_by_key: defaultdict[tuple[str, str, float], set[float]] = defaultdict(set)
     strategies_by_key: defaultdict[tuple[str, str, float], set[str]] = defaultdict(set)
+    atrs_by_key: defaultdict[tuple[str, str, float], set[float]] = defaultdict(set)
     for _, row in planned_stops.iterrows():
         symbol = str(row.get("symbol") or "").upper().strip()
         if not symbol:
@@ -563,14 +570,19 @@ def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, 
         strategy = normalize_strategy(row.get("strategy"))
         if strategy:
             strategies_by_key[key].add(strategy)
+        atr = pd.to_numeric(row.get("atr"), errors="coerce")
+        if not pd.isna(atr):
+            atrs_by_key[key].add(float(atr))
 
     lookup = {}
-    for key in set(stops_by_key) | set(strategies_by_key):
+    for key in set(stops_by_key) | set(strategies_by_key) | set(atrs_by_key):
         stops = stops_by_key[key]
         strategies = strategies_by_key[key]
+        atrs = atrs_by_key[key]
         lookup[key] = {
             "planned_stop": next(iter(stops)) if len(stops) == 1 else None,
             "strategy": next(iter(strategies)) if len(strategies) == 1 else "",
+            "atr": next(iter(atrs)) if len(atrs) == 1 else None,
         }
     return lookup
 

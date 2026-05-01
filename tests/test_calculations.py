@@ -33,6 +33,7 @@ def test_calculates_position_size_from_screenshot_values():
 
     row = result.iloc[0]
     assert row["stop_loss_percent"] == 3.28
+    assert pd.isna(row["risk_in_atr"])
     assert row["risk_amount"] == 100.00
     assert row["number_of_shares"] == 13
     assert row["sell_lot"] == 4
@@ -89,6 +90,75 @@ def test_risk_percent_changes_total_risk_and_shares():
     assert row["position_size"] == 2500
 
 
+def test_calculates_industry_standard_risk_in_atr():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "KFRC",
+                    "share_price": 42.51,
+                    "stop_price": 39.40,
+                    "atr": 6.73,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 0.12,
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["risk_in_atr"] == 0.46
+    assert row["number_of_shares"] == 7
+
+
+def test_missing_atr_keeps_position_valid_with_blank_risk_in_atr():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "TEST",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert pd.isna(row["risk_in_atr"])
+    assert row["validation_error"] == ""
+
+
+def test_non_positive_atr_keeps_position_valid_with_blank_risk_in_atr():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "ZERO",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "atr": 0,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                },
+                {
+                    "symbol": "NEG",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "atr": -1,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                },
+            ]
+        )
+    )
+
+    assert result["risk_in_atr"].isna().all()
+    assert result["validation_error"].tolist() == ["", ""]
+
+
 def test_draft_position_builds_normalized_single_row():
     draft = draft_position(
         symbol=" aapl ",
@@ -103,6 +173,7 @@ def test_draft_position_builds_normalized_single_row():
     assert row["symbol"] == "AAPL"
     assert row["buy_date"] == "2026-04-24"
     assert row["share_price"] == 100
+    assert pd.isna(row["atr"])
     assert list(draft.columns) == INPUT_COLUMNS
 
 
