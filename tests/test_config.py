@@ -4,7 +4,12 @@ from stock_calculator.config import AppConfig, load_config
 def test_load_config_uses_defaults_when_file_is_missing(tmp_path):
     config = load_config(tmp_path / "missing.toml")
 
-    assert config == AppConfig(portfolio_amount=20_000.0, sizing_portfolio_amount=20_000.0, risk_percent=0.5)
+    assert config == AppConfig(
+        portfolio_amount=20_000.0,
+        sizing_portfolio_amount=20_000.0,
+        risk_percent=0.5,
+        market_regime="GO",
+    )
 
 
 def test_load_config_reads_valid_defaults(tmp_path):
@@ -15,6 +20,7 @@ def test_load_config_reads_valid_defaults(tmp_path):
 portfolio_amount = 50000.0
 sizing_portfolio_amount = 40000.0
 risk_percent = 1.25
+market_regime = "SELECTIVE GO"
 """,
         encoding="utf-8",
     )
@@ -24,6 +30,7 @@ risk_percent = 1.25
     assert config.portfolio_amount == 50_000.0
     assert config.sizing_portfolio_amount == 40_000.0
     assert config.risk_percent == 1.25
+    assert config.market_regime == "SELECTIVE GO"
 
 
 def test_load_config_defaults_sizing_portfolio_to_baseline_portfolio(tmp_path):
@@ -88,4 +95,24 @@ def test_load_config_falls_back_for_invalid_toml(tmp_path):
 
     config = load_config(path)
 
-    assert config == AppConfig(portfolio_amount=20_000.0, sizing_portfolio_amount=20_000.0, risk_percent=0.5)
+    assert config == AppConfig(
+        portfolio_amount=20_000.0,
+        sizing_portfolio_amount=20_000.0,
+        risk_percent=0.5,
+        market_regime="GO",
+    )
+
+
+def test_load_config_falls_back_for_invalid_market_regime(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[defaults]
+market_regime = "BAD"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.market_regime == "GO"
