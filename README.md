@@ -83,6 +83,7 @@ Calculator defaults live in `config.toml`:
 portfolio_amount = 20000.0
 sizing_portfolio_amount = 20000.0
 risk_percent = 0.5
+market_regime = "GO"
 ```
 
-Each saved position still stores the portfolio and risk values used for that row.
+`risk_percent` is used as a fallback when the market-regime matrix cannot be applied. Each saved position still stores the portfolio and risk values used for that row.

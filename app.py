@@ -29,6 +29,13 @@ from stock_calculator.robinhood import (
     normalize_strategy,
     parse_robinhood_csv,
 )
+from stock_calculator.risk import (
+    MARKET_REGIME_OPTIONS,
+    default_strategy,
+    normalize_market_regime,
+    strategy_mode_for_selection,
+    suggested_risk_percent,
+)
 from stock_calculator.storage import (
     StorageError,
     append_robinhood_transactions,
@@ -841,8 +848,8 @@ def add_current_draft() -> None:
     st.session_state.draft_stop_price = 0.0
     st.session_state.draft_atr = 0.0
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
-    st.session_state.draft_risk_percent = config.risk_percent
-    st.session_state.draft_strategy = STRATEGY_OPTIONS[0]
+    st.session_state.draft_strategy = default_strategy()
+    st.session_state.draft_risk_context = None
 
 
 def delete_selected_positions(selected_rows: list[int]) -> None:
@@ -876,7 +883,11 @@ if "draft_portfolio_amount" not in st.session_state:
 if "draft_risk_percent" not in st.session_state:
     st.session_state.draft_risk_percent = config.risk_percent
 if "draft_strategy" not in st.session_state:
-    st.session_state.draft_strategy = STRATEGY_OPTIONS[0]
+    st.session_state.draft_strategy = default_strategy()
+if "draft_market_regime" not in st.session_state:
+    st.session_state.draft_market_regime = normalize_market_regime(config.market_regime)
+if "draft_risk_context" not in st.session_state:
+    st.session_state.draft_risk_context = None
 if "position_editor_revision" not in st.session_state:
     st.session_state.position_editor_revision = 0
 
@@ -891,12 +902,32 @@ render_header(total_pnl, trade_metrics, header_container)
 
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
-top_cols = st.columns([1.2, 1, 1, 1, 0.8, 1, 0.8, 0.9])
+selected_strategy_mode = strategy_mode_for_selection(strategy_metrics, st.session_state.draft_strategy)
+risk_context = (
+    normalize_market_regime(st.session_state.draft_market_regime),
+    st.session_state.draft_strategy,
+    selected_strategy_mode,
+)
+if st.session_state.draft_risk_context != risk_context:
+    st.session_state.draft_risk_percent = suggested_risk_percent(
+        risk_context[0],
+        risk_context[2],
+        config.risk_percent,
+    )
+    st.session_state.draft_risk_context = risk_context
+
+top_cols = st.columns([1.2, 0.95, 1.15, 0.85, 0.7, 1.35, 1.0, 1.0, 0.75])
 symbol = top_cols[0].text_input("Symbol", key="draft_symbol").upper().strip()
 buy_date = top_cols[1].date_input("Buy Date", key="draft_buy_date")
-share_price = top_cols[2].number_input("Share Price", min_value=0.0, step=0.01, format="%.2f", key="draft_share_price")
-stop_price = top_cols[3].number_input("Stop Price", min_value=0.0, step=0.01, format="%.2f", key="draft_stop_price")
-atr = top_cols[4].number_input("ATR %", min_value=0.0, step=0.01, format="%.2f", key="draft_atr")
+top_cols[2].selectbox("Market Regime", MARKET_REGIME_OPTIONS, key="draft_market_regime")
+top_cols[3].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
+risk_percent = top_cols[4].number_input(
+    "Risk %",
+    min_value=0.0,
+    step=0.01,
+    format="%.2f",
+    key="draft_risk_percent",
+)
 portfolio_amount = top_cols[5].number_input(
     "Portfolio",
     min_value=0.0,
@@ -904,14 +935,9 @@ portfolio_amount = top_cols[5].number_input(
     format="%.2f",
     key="draft_portfolio_amount",
 )
-risk_percent = top_cols[6].number_input(
-    "Risk %",
-    min_value=0.0,
-    step=0.05,
-    format="%.2f",
-    key="draft_risk_percent",
-)
-top_cols[7].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
+share_price = top_cols[6].number_input("Share Price", min_value=0.0, step=0.01, format="%.2f", key="draft_share_price")
+stop_price = top_cols[7].number_input("Stop Price", min_value=0.0, step=0.01, format="%.2f", key="draft_stop_price")
+atr = top_cols[8].number_input("ATR %", min_value=0.0, step=0.01, format="%.2f", key="draft_atr")
 
 draft = draft_position(
     symbol=symbol,
