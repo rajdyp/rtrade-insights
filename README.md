@@ -24,6 +24,59 @@ Open the URL Streamlit prints, usually `http://localhost:8501`.
 
 Light and dark mode are controlled through Streamlit's settings menu.
 
+## Local Ranking API
+
+Run the local ranking API from the same virtual environment:
+
+```bash
+.venv/bin/python -m stock_calculator.cli serve
+```
+
+Post grouped candidate rows to `/rank`. The row format is `SYMBOL PRICE STOP ATR%`; strategy comes from the section header.
+
+```bash
+curl -X POST "http://127.0.0.1:8000/rank?format=table" \
+  --data-binary $'5% BO\nPINS 21.16 20.69 5.2\n\nEP\nNVDA 100 95 5\n'
+```
+
+Supported output formats are `table`, `csv`, and `json`. Results are grouped by strategy and sorted by lowest R/ATR inside each strategy. The API calculates only; it does not save or modify positions.
+
+## Local Workflow CLI
+
+Use separate files for research and ranking. Research files contain ticker symbols only:
+
+```text
+PINS
+APP
+NVDA
+```
+
+Open one Google AI Mode tab per ticker:
+
+```bash
+.venv/bin/python -m stock_calculator.cli research --file research_tickers.txt
+```
+
+The first research run may ask you to sign in to Google in the opened Chrome window. The CLI stores that browser session in `.browser-profile/`, which is ignored by git.
+
+Ranking files contain grouped rows with `SYMBOL PRICE STOP ATR%`:
+
+```text
+5% BO
+PINS 21.16 20.69 5.2
+
+EP
+NVDA 100 95 5
+```
+
+Print the ranked table without `curl`:
+
+```bash
+.venv/bin/python -m stock_calculator.cli rank --file rank_candidates.txt
+```
+
+Use `--format csv` or `--format json` for machine-readable output. JSON returns top-level `groups` keyed by `EP`, `5% BO`, and `BO`.
+
 ## Test
 
 ```bash
