@@ -102,6 +102,7 @@ def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
                     "planned_stop": "190.50",
                     "strategy": "EP",
                     "atr": "4.25",
+                    "market_regime": "selective go",
                 }
             ]
         ),
@@ -116,6 +117,7 @@ def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
     assert loaded["planned_stop"].tolist() == [190.50]
     assert loaded["strategy"].tolist() == ["EP"]
     assert loaded["atr"].tolist() == [4.25]
+    assert loaded["market_regime"].tolist() == ["SELECTIVE GO"]
 
 
 def test_load_planned_stops_accepts_old_files_without_strategy(tmp_path):
@@ -141,6 +143,37 @@ def test_load_planned_stops_accepts_old_files_without_atr(tmp_path):
 
     assert loaded.columns.tolist() == PLANNED_STOP_COLUMNS
     assert loaded["atr"].isna().all()
+
+
+def test_load_planned_stops_accepts_old_files_without_market_regime(tmp_path):
+    path = tmp_path / "planned_stops.csv"
+    pd.DataFrame(
+        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.50, "strategy": "EP"}]
+    ).to_csv(path, index=False)
+
+    loaded = load_planned_stops(path)
+
+    assert loaded.columns.tolist() == PLANNED_STOP_COLUMNS
+    assert loaded["market_regime"].tolist() == [""]
+
+
+def test_load_planned_stops_normalizes_invalid_market_regime_to_blank(tmp_path):
+    path = tmp_path / "planned_stops.csv"
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "quantity": 2,
+                "planned_stop": 190.50,
+                "market_regime": "BAD",
+            }
+        ]
+    ).to_csv(path, index=False)
+
+    loaded = load_planned_stops(path)
+
+    assert loaded["market_regime"].tolist() == [""]
 
 
 def test_save_and_load_robinhood_transactions_preserves_cleaned_columns(tmp_path):
@@ -218,10 +251,53 @@ def test_generate_planned_stops_from_transactions_uses_buy_rows_with_blank_stops
     ]
     assert result["planned_stop"].isna().all()
     assert result["strategy"].tolist() == ["", ""]
+    assert result["market_regime"].tolist() == ["", ""]
 
 
 def test_upsert_planned_stop_records_calculated_entry_stop():
     planned_stops = pd.DataFrame(columns=PLANNED_STOP_COLUMNS)
+    calculated_position = pd.Series(
+        {
+            "symbol": "aapl",
+            "buy_date": "2026-04-01",
+            "number_of_shares": 2,
+            "stop_price": 190.5,
+            "strategy": "BO",
+            "atr": 4.25,
+            "market_regime": "NO-GO",
+        }
+    )
+
+    result = upsert_planned_stop(planned_stops, calculated_position)
+
+    assert result.to_dict("records") == [
+        {
+            "symbol": "AAPL",
+            "buy_date": "2026-04-01",
+            "quantity": 2,
+            "planned_stop": 190.5,
+            "strategy": "BO",
+            "atr": 4.25,
+            "market_regime": "NO-GO",
+        }
+    ]
+
+
+def test_upsert_planned_stop_preserves_existing_market_regime_when_missing_from_update():
+    planned_stops = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "quantity": 2,
+                "planned_stop": 180,
+                "strategy": "EP",
+                "atr": 4.0,
+                "market_regime": "SELECTIVE GO",
+            }
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
     calculated_position = pd.Series(
         {
             "symbol": "aapl",
@@ -235,9 +311,7 @@ def test_upsert_planned_stop_records_calculated_entry_stop():
 
     result = upsert_planned_stop(planned_stops, calculated_position)
 
-    assert result.to_dict("records") == [
-        {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.5, "strategy": "BO", "atr": 4.25}
-    ]
+    assert result.iloc[0]["market_regime"] == "SELECTIVE GO"
 
 
 def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
@@ -248,7 +322,17 @@ def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
         ]
     )
     planned_stops = pd.DataFrame(
-        [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 1, "planned_stop": 95, "strategy": "EP", "atr": 2.5}],
+        [
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "quantity": 1,
+                "planned_stop": 95,
+                "strategy": "EP",
+                "atr": 2.5,
+                "market_regime": "GO",
+            }
+        ],
         columns=PLANNED_STOP_COLUMNS,
     )
 
@@ -257,6 +341,7 @@ def test_robinhood_planned_stop_lookup_does_not_depend_on_active_positions():
     assert result.closed_trades.iloc[0]["planned_stop"] == 95
     assert result.closed_trades.iloc[0]["strategy"] == "EP"
     assert result.closed_trades.iloc[0]["atr"] == 2.5
+    assert result.closed_trades.iloc[0]["market_regime"] == "GO"
     assert result.missing_planned_stops == 0
 
 
@@ -307,7 +392,7 @@ def test_google_sheets_save_writes_headers_and_normalized_rows():
 
     assert worksheet.values == [
         PLANNED_STOP_COLUMNS,
-        ["AAPL", "2026-04-01", 2.0, 190.5, "EP", ""],
+        ["AAPL", "2026-04-01", 2.0, 190.5, "EP", "", ""],
     ]
 
 
@@ -361,6 +446,7 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
             "stop_price": 190.5,
             "strategy": "5% BO",
             "atr": 4.25,
+            "market_regime": "SELECTIVE GO",
         }
     )
 
@@ -369,7 +455,7 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
 
     assert worksheet.values == [
         PLANNED_STOP_COLUMNS,
-        ["AAPL", "2026-04-01", 2, 190.5, "5% BO", 4.25],
+        ["AAPL", "2026-04-01", 2, 190.5, "5% BO", 4.25, "SELECTIVE GO"],
     ]
 
 

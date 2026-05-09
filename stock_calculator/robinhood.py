@@ -48,6 +48,7 @@ PLANNED_STOP_COLUMNS = [
     "planned_stop",
     "strategy",
     "atr",
+    "market_regime",
 ]
 
 CLOSED_TRADE_COLUMNS = [
@@ -58,6 +59,7 @@ CLOSED_TRADE_COLUMNS = [
     "planned_stop",
     "strategy",
     "atr",
+    "market_regime",
     "buy_price",
     "buy_amount",
     "sell_price",
@@ -74,6 +76,7 @@ OPEN_LOT_COLUMNS = [
     "planned_stop",
     "strategy",
     "atr",
+    "market_regime",
     "buy_price",
     "cost_basis",
     "hold_days",
@@ -391,7 +394,7 @@ def derive_fifo_trades(
                     "exit_matches": [],
                     **planned_stop_lookup.get(
                         (symbol, buy_date, _quantity_key(quantity)),
-                        {"planned_stop": None, "strategy": "", "atr": None},
+                        {"planned_stop": None, "strategy": "", "atr": None, "market_regime": ""},
                     ),
                 }
             )
@@ -417,6 +420,7 @@ def derive_fifo_trades(
                 "planned_stop": lot["planned_stop"],
                 "strategy": lot["strategy"],
                 "atr": lot["atr"],
+                "market_regime": lot["market_regime"],
                 "buy_price": buy_price,
                 "buy_amount": buy_amount,
                 "sell_price": sell_price,
@@ -458,6 +462,7 @@ def derive_fifo_trades(
                     "planned_stop": lot["planned_stop"],
                     "strategy": lot["strategy"],
                     "atr": lot["atr"],
+                    "market_regime": lot["market_regime"],
                     "buy_price": float(lot["buy_price"]),
                     "cost_basis": round(float(lot["quantity"]) * float(lot["buy_price"]), 2),
                     "hold_days": weekday_hold_count(lot["buy_date"], as_of=as_of),
@@ -491,6 +496,7 @@ def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
         "planned_stop": lot["planned_stop"],
         "strategy": lot["strategy"],
         "atr": lot["atr"],
+        "market_regime": lot["market_regime"],
         "buy_price": float(lot["buy_price"]),
         "buy_amount": buy_amount,
         "sell_price": sell_price,
@@ -544,6 +550,29 @@ def display_strategy(value: Any) -> str:
     return strategy or UNCLASSIFIED_STRATEGY
 
 
+def display_trade_context_frame(df: pd.DataFrame) -> pd.DataFrame:
+    frame = df.copy()
+    if "atr" in frame.columns:
+        frame["atr"] = frame["atr"].apply(_display_optional_number)
+    if "market_regime" in frame.columns:
+        frame["market_regime"] = frame["market_regime"].apply(_display_optional_text)
+    return frame
+
+
+def _display_optional_number(value: Any) -> str:
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.isna(number):
+        return "N/A"
+    return f"{float(number):.2f}"
+
+
+def _display_optional_text(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    text = str(value).strip()
+    return text if text and text.lower() not in {"none", "nan"} else "N/A"
+
+
 def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, str, float], dict[str, float | str | None]]:
     if planned_stops is None or planned_stops.empty:
         return {}
@@ -551,6 +580,7 @@ def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, 
     stops_by_key: defaultdict[tuple[str, str, float], set[float]] = defaultdict(set)
     strategies_by_key: defaultdict[tuple[str, str, float], set[str]] = defaultdict(set)
     atrs_by_key: defaultdict[tuple[str, str, float], set[float]] = defaultdict(set)
+    regimes_by_key: defaultdict[tuple[str, str, float], set[str]] = defaultdict(set)
     for _, row in planned_stops.iterrows():
         symbol = str(row.get("symbol") or "").upper().strip()
         if not symbol:
@@ -573,18 +603,28 @@ def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, 
         atr = pd.to_numeric(row.get("atr"), errors="coerce")
         if not pd.isna(atr):
             atrs_by_key[key].add(float(atr))
+        market_regime = _normalize_market_regime_or_blank(row.get("market_regime"))
+        if market_regime:
+            regimes_by_key[key].add(market_regime)
 
     lookup = {}
-    for key in set(stops_by_key) | set(strategies_by_key) | set(atrs_by_key):
+    for key in set(stops_by_key) | set(strategies_by_key) | set(atrs_by_key) | set(regimes_by_key):
         stops = stops_by_key[key]
         strategies = strategies_by_key[key]
         atrs = atrs_by_key[key]
+        regimes = regimes_by_key[key]
         lookup[key] = {
             "planned_stop": next(iter(stops)) if len(stops) == 1 else None,
             "strategy": next(iter(strategies)) if len(strategies) == 1 else "",
             "atr": next(iter(atrs)) if len(atrs) == 1 else None,
+            "market_regime": next(iter(regimes)) if len(regimes) == 1 else "",
         }
     return lookup
+
+
+def _normalize_market_regime_or_blank(value: Any) -> str:
+    regime = str(value or "").strip().upper()
+    return regime if regime in {"GO", "SELECTIVE GO", "NO-GO"} else ""
 
 
 def _parse_money(value: Any) -> float | None:

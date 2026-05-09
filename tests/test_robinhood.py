@@ -9,6 +9,7 @@ from stock_calculator.robinhood import (
     calculate_total_realized_pnl,
     calculate_trade_metrics,
     derive_fifo_trades,
+    display_trade_context_frame,
     parse_robinhood_csv,
 )
 
@@ -53,6 +54,24 @@ def test_parse_robinhood_csv_reports_genuinely_malformed_non_footer_rows():
     assert result.malformed_rows.iloc[0]["row_number"] == 3
 
 
+def test_display_trade_context_frame_shows_missing_atr_and_regime_as_na_without_mutating_source():
+    source = pd.DataFrame(
+        [
+            {"symbol": "AAPL", "atr": None, "market_regime": ""},
+            {"symbol": "MSFT", "atr": 2.5, "market_regime": "SELECTIVE GO"},
+        ]
+    )
+
+    displayed = display_trade_context_frame(source)
+
+    assert displayed[["atr", "market_regime"]].to_dict("records") == [
+        {"atr": "N/A", "market_regime": "N/A"},
+        {"atr": "2.50", "market_regime": "SELECTIVE GO"},
+    ]
+    assert pd.isna(source.iloc[0]["atr"])
+    assert source.iloc[0]["market_regime"] == ""
+
+
 def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
     transactions = pd.DataFrame(
         [
@@ -69,6 +88,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
                 "planned_stop": 58.25,
                 "strategy": "EP",
                 "atr": 4.5,
+                "market_regime": "SELECTIVE GO",
             }
         ],
         columns=PLANNED_STOP_COLUMNS,
@@ -80,6 +100,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
     assert row["planned_stop"] == 58.25
     assert row["strategy"] == "EP"
     assert row["atr"] == 4.5
+    assert row["market_regime"] == "SELECTIVE GO"
     assert row["buy_price"] == 63.84
     assert row["sell_price"] == 60.90
     assert row["realized_pnl"] == -20.58
@@ -88,7 +109,7 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
     assert result.missing_planned_stops == 0
 
 
-def test_derive_fifo_trades_carries_planned_atr_into_closed_trades_and_open_lots():
+def test_derive_fifo_trades_carries_planned_atr_and_market_regime_into_closed_trades_and_open_lots():
     transactions = pd.DataFrame(
         [
             {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 10, "price": 100},
@@ -98,8 +119,24 @@ def test_derive_fifo_trades_carries_planned_atr_into_closed_trades_and_open_lots
     )
     planned = pd.DataFrame(
         [
-            {"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 10, "planned_stop": 96, "strategy": "EP", "atr": 2.5},
-            {"symbol": "AAPL", "buy_date": "2026-04-02", "quantity": 5, "planned_stop": 97, "strategy": "BO", "atr": 3.5},
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "quantity": 10,
+                "planned_stop": 96,
+                "strategy": "EP",
+                "atr": 2.5,
+                "market_regime": "GO",
+            },
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-02",
+                "quantity": 5,
+                "planned_stop": 97,
+                "strategy": "BO",
+                "atr": 3.5,
+                "market_regime": "NO-GO",
+            },
         ],
         columns=PLANNED_STOP_COLUMNS,
     )
@@ -107,8 +144,11 @@ def test_derive_fifo_trades_carries_planned_atr_into_closed_trades_and_open_lots
     result = derive_fifo_trades(transactions, planned)
 
     assert result.closed_trades.iloc[0]["atr"] == 2.5
+    assert result.closed_trades.iloc[0]["market_regime"] == "GO"
     assert result.exit_matches.iloc[0]["atr"] == 2.5
+    assert result.exit_matches.iloc[0]["market_regime"] == "GO"
     assert result.open_lots.iloc[0]["atr"] == 3.5
+    assert result.open_lots.iloc[0]["market_regime"] == "NO-GO"
 
 
 def test_derive_fifo_trades_supports_partial_sells_and_open_lots():

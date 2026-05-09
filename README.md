@@ -17,7 +17,7 @@ Personal Streamlit dashboard for position sizing, trade metrics, and portfolio t
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/streamlit run app.py
+.venv/bin/python -m streamlit run app.py
 ```
 
 Open the URL Streamlit prints, usually `http://localhost:8501`.
@@ -89,7 +89,7 @@ By default, the app creates and updates local runtime CSV files under `data/`. T
 
 Editable source data lives in `data/positions.csv`. The app keeps calculated fields generated from the source columns instead of saving formula outputs back into the input file. ATR is an optional percent input column; risk in ATR is recalculated from stop loss percent and ATR percent.
 
-Durable entry stops, strategy tags, and optional entry ATR % values live in `data/planned_stops.csv`. Robinhood trade reporting reads planned stops, strategies, and ATR % values from this ledger by exact symbol, buy date, and quantity, so closed trades keep their original stop, strategy, and ATR context after active rows are removed from `positions.csv`. Closed trades are fully exited buy lots; partial exits are aggregated into one closed trade only after the original lot is fully sold. Individual FIFO sell chunks remain available as exit matches for audit. Existing rows without a strategy are shown as `Unclassified` until you backfill the `strategy` column with `EP`, `5% BO`, or `BO`.
+Durable entry stops, strategy tags, optional entry ATR % values, and entry market regime live in `data/planned_stops.csv`. Robinhood trade reporting reads planned stops, strategies, ATR % values, and market regimes from this ledger by exact symbol, buy date, and quantity, so closed trades keep their original stop, strategy, ATR, and regime context after active rows are removed from `positions.csv`. Closed trades are fully exited buy lots; partial exits are aggregated into one closed trade only after the original lot is fully sold. Individual FIFO sell chunks remain available as exit matches for audit. Existing rows without a strategy are shown as `Unclassified` until you backfill the `strategy` column with `EP`, `5% BO`, or `BO`. Existing rows without a `market_regime` remain blank until backfilled.
 
 Cleaned Robinhood upload transactions are stored locally in `data/robinhood_transactions.csv`. Later Robinhood uploads append new transactions and skip duplicate rows so overlapping exports do not double-count metrics.
 
@@ -102,6 +102,8 @@ Required worksheet tabs are created automatically if missing:
 - `positions`
 - `planned_stops`
 - `robinhood_transactions`
+
+The `planned_stops` tab includes `market_regime` as durable entry context. Existing sheets without that column continue to load; the column is added the next time planned stops are saved.
 
 Streamlit secrets:
 
@@ -139,4 +141,4 @@ risk_percent = 0.5
 market_regime = "GO"
 ```
 
-`risk_percent` is used as a fallback when the market-regime matrix cannot be applied. Each saved position still stores the portfolio and risk values used for that row.
+`risk_percent` is used as a fallback when the market-regime matrix cannot be applied. Each saved position still stores the portfolio and risk values used for that row, while `planned_stops.market_regime` stores the regime context captured at entry for later trade analytics.
