@@ -26,6 +26,7 @@ from stock_calculator.robinhood import (
     calculate_trade_metrics,
     derive_fifo_trades,
     display_strategy,
+    display_trade_context_frame,
     normalize_strategy,
     parse_robinhood_csv,
 )
@@ -454,6 +455,16 @@ def apply_styles() -> None:
             font-size: 0.9rem !important;
         }
 
+        div[data-testid="stDataFrame"] * {
+            font-size: 0.84rem !important;
+        }
+
+        div[data-testid="stDataFrame"] [role="gridcell"],
+        div[data-testid="stDataFrame"] [role="columnheader"] {
+            padding-left: 0.32rem !important;
+            padding-right: 0.32rem !important;
+        }
+
         div[data-testid="stDataFrameResizable"] {
             background: color-mix(in srgb, var(--app-bg), var(--app-border) 22%) !important;
         }
@@ -520,34 +531,36 @@ def positions_column_config() -> dict:
 
 def closed_trades_column_config() -> dict:
     return {
-        "symbol": st.column_config.TextColumn("Symbol", width=84),
-        "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=108),
-        "sell_date": st.column_config.DateColumn("Sell Date", format="MM/DD/YYYY", width=108),
-        "quantity": st.column_config.NumberColumn("Quantity", width=86),
-        "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
-        "strategy": st.column_config.TextColumn("Strategy", width=90),
-        "atr": st.column_config.NumberColumn("ATR", format="%.2f", width=74),
-        "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=104),
-        "buy_amount": st.column_config.NumberColumn("Buy Amount", format="$%.2f", width=116),
-        "sell_price": st.column_config.NumberColumn("Sell Price", format="$%.2f", width=104),
-        "sell_amount": st.column_config.NumberColumn("Sell Amount", format="$%.2f", width=116),
-        "realized_pnl": st.column_config.NumberColumn("Realized P/L", format="$%.2f", width=116),
-        "realized_pnl_percent": st.column_config.NumberColumn("P/L %", format="%.2f%%", width=86),
-        "hold_days": st.column_config.NumberColumn("Hold Days", width=88),
+        "symbol": st.column_config.TextColumn("Symbol", width=68),
+        "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=94),
+        "sell_date": st.column_config.DateColumn("Sell Date", format="MM/DD/YYYY", width=94),
+        "quantity": st.column_config.NumberColumn("Quantity", width=58),
+        "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=82),
+        "strategy": st.column_config.TextColumn("Strategy", width=72),
+        "atr": st.column_config.TextColumn("ATR", width=52),
+        "market_regime": st.column_config.TextColumn("Regime", width=102),
+        "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=78),
+        "buy_amount": st.column_config.NumberColumn("Buy Amount", format="$%.2f", width=92),
+        "sell_price": st.column_config.NumberColumn("Sell Price", format="$%.2f", width=78),
+        "sell_amount": st.column_config.NumberColumn("Sell Amount", format="$%.2f", width=92),
+        "realized_pnl": st.column_config.NumberColumn("Realized P/L", format="$%.2f", width=92),
+        "realized_pnl_percent": st.column_config.NumberColumn("P/L %", format="%.2f%%", width=62),
+        "hold_days": st.column_config.NumberColumn("Hold Days", width=46),
     }
 
 
 def open_lots_column_config() -> dict:
     return {
-        "symbol": st.column_config.TextColumn("Symbol", width=84),
-        "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=108),
-        "quantity": st.column_config.NumberColumn("Quantity", width=86),
-        "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
-        "strategy": st.column_config.TextColumn("Strategy", width=90),
-        "atr": st.column_config.NumberColumn("ATR", format="%.2f", width=74),
-        "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=104),
-        "cost_basis": st.column_config.NumberColumn("Cost Basis", format="$%.2f", width=116),
-        "hold_days": st.column_config.NumberColumn("Hold Days", width=88),
+        "symbol": st.column_config.TextColumn("Symbol", width=68),
+        "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=94),
+        "quantity": st.column_config.NumberColumn("Quantity", width=58),
+        "planned_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=82),
+        "strategy": st.column_config.TextColumn("Strategy", width=72),
+        "atr": st.column_config.TextColumn("ATR", width=52),
+        "market_regime": st.column_config.TextColumn("Regime", width=102),
+        "buy_price": st.column_config.NumberColumn("Buy Price", format="$%.2f", width=78),
+        "cost_basis": st.column_config.NumberColumn("Cost Basis", format="$%.2f", width=92),
+        "hold_days": st.column_config.NumberColumn("Hold Days", width=46),
     }
 
 
@@ -600,8 +613,34 @@ def upsert_position_strategies(
     for index, (_, row) in enumerate(calculated_positions.reset_index(drop=True).iterrows()):
         row_with_strategy = row.copy()
         row_with_strategy["strategy"] = strategies[index] if index < len(strategies) else ""
+        row_with_strategy["market_regime"] = existing_planned_market_regime(row_with_strategy, updated)
         updated = upsert_planned_stop(updated, row_with_strategy)
     return updated
+
+
+def existing_planned_market_regime(row: pd.Series, planned_stops: pd.DataFrame) -> str:
+    symbol = str(row.get("symbol") or "").upper().strip()
+    buy_date = str(row.get("buy_date") or "").strip()
+    quantity = pd.to_numeric(row.get("number_of_shares"), errors="coerce")
+    if not symbol or not buy_date or pd.isna(quantity) or planned_stops.empty:
+        return ""
+
+    matches = planned_stops[
+        (planned_stops["symbol"].fillna("").astype(str).str.upper().str.strip() == symbol)
+        & (planned_stops["buy_date"].fillna("").astype(str).str.strip() == buy_date)
+        & (pd.to_numeric(planned_stops["quantity"], errors="coerce") == quantity)
+    ]
+    regimes = {_normalize_market_regime_or_blank(value) for value in matches.get("market_regime", [])}
+    regimes.discard("")
+    return next(iter(regimes)) if len(regimes) == 1 else ""
+
+
+def _normalize_market_regime_or_blank(value: object) -> str:
+    regime = str(value or "").strip()
+    if not regime:
+        return ""
+    normalized = normalize_market_regime(regime)
+    return normalized if normalized == regime.upper() else ""
 
 
 def display_date_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -611,7 +650,7 @@ def display_date_frame(df: pd.DataFrame) -> pd.DataFrame:
             frame[column] = pd.to_datetime(frame[column], errors="coerce").dt.date
     if "strategy" in frame.columns:
         frame["strategy"] = frame["strategy"].apply(display_strategy)
-    return frame
+    return display_trade_context_frame(frame)
 
 
 def filtered_output(df: pd.DataFrame) -> pd.DataFrame:
@@ -839,6 +878,9 @@ def add_current_draft() -> None:
 
     st.session_state.positions = append_committed_position(st.session_state.positions, draft_from_state)
     calculated_draft.loc[calculated_draft.index[0], "strategy"] = st.session_state.get("draft_strategy", STRATEGY_OPTIONS[0])
+    calculated_draft.loc[calculated_draft.index[0], "market_regime"] = normalize_market_regime(
+        st.session_state.get("draft_market_regime")
+    )
     st.session_state.planned_stops = upsert_planned_stop(st.session_state.planned_stops, calculated_draft.iloc[0])
     save_positions(st.session_state.positions)
     save_planned_stops(st.session_state.planned_stops)

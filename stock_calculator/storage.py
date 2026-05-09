@@ -7,6 +7,7 @@ from typing import Any, Mapping, Protocol
 import pandas as pd
 
 from stock_calculator.calculations import INPUT_COLUMNS, committed_positions, normalize_input_frame
+from stock_calculator.risk import normalize_market_regime
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, normalize_strategy
 
 
@@ -302,6 +303,8 @@ def upsert_planned_stop(planned_stops: pd.DataFrame, calculated_position: pd.Ser
 
     normalized = _normalize_planned_stops(planned_stops)
     key = _planned_stop_key(row)
+    if not row.get("market_regime"):
+        row["market_regime"] = _planned_market_regime_for_key(normalized, key)
     keep_rows = [_planned_stop_key(existing) != key for _, existing in normalized.iterrows()]
     updated = pd.concat([pd.DataFrame([row]), normalized.loc[keep_rows]], ignore_index=True)
     return _normalize_planned_stops(updated)
@@ -318,6 +321,7 @@ def generate_planned_stops_from_transactions(transactions: pd.DataFrame) -> pd.D
             "planned_stop": None,
             "strategy": "",
             "atr": None,
+            "market_regime": "",
         }
         for _, row in buys.iterrows()
     ]
@@ -387,6 +391,7 @@ def _normalize_planned_stops(df: pd.DataFrame) -> pd.DataFrame:
     normalized["planned_stop"] = pd.to_numeric(normalized["planned_stop"], errors="coerce")
     normalized["strategy"] = normalized["strategy"].apply(normalize_strategy)
     normalized["atr"] = pd.to_numeric(normalized["atr"], errors="coerce")
+    normalized["market_regime"] = normalized["market_regime"].apply(_normalize_market_regime_or_blank)
 
     return normalized[normalized["symbol"] != ""].reset_index(drop=True)
 
@@ -409,7 +414,16 @@ def _planned_stop_from_calculated_position(row: pd.Series) -> dict[str, object] 
         "planned_stop": planned_stop,
         "strategy": normalize_strategy(row.get("strategy")),
         "atr": pd.to_numeric(row.get("atr"), errors="coerce"),
+        "market_regime": _normalize_market_regime_or_blank(row.get("market_regime")),
     }
+
+
+def _normalize_market_regime_or_blank(value: object) -> str:
+    regime = str(value or "").strip()
+    if not regime:
+        return ""
+    normalized = normalize_market_regime(regime)
+    return normalized if normalized == regime.upper() else ""
 
 
 def _planned_stop_key(row: pd.Series | dict[str, object]) -> tuple[str, str, float | None]:
@@ -419,6 +433,18 @@ def _planned_stop_key(row: pd.Series | dict[str, object]) -> tuple[str, str, flo
         str(row.get("buy_date") or "").strip(),
         quantity,
     )
+
+
+def _planned_market_regime_for_key(
+    planned_stops: pd.DataFrame,
+    key: tuple[str, str, float | None],
+) -> str:
+    regimes = {
+        str(row.get("market_regime") or "").strip()
+        for _, row in planned_stops.iterrows()
+        if _planned_stop_key(row) == key and str(row.get("market_regime") or "").strip()
+    }
+    return next(iter(regimes)) if len(regimes) == 1 else ""
 
 
 def _transaction_keys(df: pd.DataFrame) -> list[tuple[str, str, str, str, str, str, float | None, float | None, float | None]]:
