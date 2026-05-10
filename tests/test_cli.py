@@ -58,6 +58,28 @@ def test_rank_file_supports_json_output(tmp_path, capsys, monkeypatch):
     assert payload["groups"]["BO"] == []
 
 
+def test_rank_file_passes_enrichment_flags(tmp_path, capsys, monkeypatch):
+    rank_file = tmp_path / "rank_candidates.txt"
+    rank_file.write_text("EP\nTEST\n", encoding="utf-8")
+    captured_call = {}
+
+    def fake_rank_candidates(text, **kwargs):
+        captured_call["text"] = text
+        captured_call["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(cli, "rank_candidates", fake_rank_candidates)
+    monkeypatch.setattr(cli, "render_rank_result", lambda result, output_format: f"{output_format}: ok\n")
+
+    exit_code = cli.main(["rank", "--file", rank_file.as_posix(), "--enrich", "--feed", "delayed_sip", "--format", "json"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert output == "json: ok\n"
+    assert captured_call["text"] == "EP\nTEST\n"
+    assert captured_call["kwargs"] == {"enrich": True, "feed": "delayed_sip"}
+
+
 def test_missing_rank_file_returns_validation_error(capsys):
     exit_code = cli.main(["rank", "--file", "/missing/rank_candidates.txt"])
 

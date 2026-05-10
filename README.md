@@ -77,6 +77,30 @@ Print the ranked table without `curl`:
 
 Use `--format csv` or `--format json` for machine-readable output. JSON returns top-level `groups` keyed by `EP`, `5% BO`, and `BO`.
 
+To fetch missing market data from Alpaca in one flow, set your local credentials outside the repo:
+
+```bash
+export APCA_API_KEY_ID="your_key_id"
+export APCA_API_SECRET_KEY="your_secret_key"
+```
+
+Then use `--enrich`. Full manual rows still win, while partial rows are filled from Alpaca:
+
+```text
+EP
+NVDA
+APP 102.25
+
+5% BO
+PINS 21.16 20.69 5.2
+```
+
+```bash
+.venv/bin/python -m stock_calculator.cli rank --file rank_candidates.txt --enrich
+```
+
+`SYMBOL` rows fetch price, compute a stop from today's low, and compute 21-day ATR%. `SYMBOL STOP` rows use your manual stop and fetch price/ATR%. The fallback stop is `today_low + min(max($0.10, price * 0.002), $1.00)`, rounded to cents. The default Alpaca feed is `iex`; use `--feed delayed_sip` or `--feed sip` only when your Alpaca plan supports the desired feed.
+
 ## Test
 
 ```bash
