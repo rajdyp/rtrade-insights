@@ -55,6 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
     rank = subparsers.add_parser("rank", help="Rank grouped candidates from a file.")
     rank.add_argument("--file", type=Path, required=True, help="Grouped candidate file with SYMBOL PRICE STOP ATR%%.")
     rank.add_argument("--format", choices=SUPPORTED_FORMATS, default="table", help="Output format. Default: table")
+    rank.add_argument("--enrich", action="store_true", help="Fetch missing price, stop, and ATR%% from Alpaca market data.")
+    rank.add_argument(
+        "--feed",
+        choices=("iex", "delayed_sip", "sip"),
+        default="iex",
+        help="Alpaca market data feed for --enrich. Default: iex",
+    )
     rank.set_defaults(handler=_handle_rank)
 
     serve = subparsers.add_parser("serve", help="Start the local /rank HTTP API.")
@@ -89,7 +96,7 @@ def _handle_rank(args: argparse.Namespace) -> int:
         raise ValueError(f"Ranking file does not exist: {args.file}")
 
     text = args.file.read_text(encoding="utf-8")
-    print(render_rank_result(rank_candidates(text), args.format), end="")
+    print(render_rank_result(rank_candidates(text, enrich=args.enrich, feed=args.feed), args.format), end="")
     return 0
 
 
