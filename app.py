@@ -21,6 +21,7 @@ from stock_calculator.config import load_config
 from stock_calculator.robinhood import (
     STRATEGY_OPTIONS,
     UNCLASSIFIED_STRATEGY,
+    calculate_strategy_attribution,
     calculate_strategy_metrics,
     calculate_total_realized_pnl,
     calculate_trade_metrics,
@@ -732,7 +733,11 @@ def render_feedback(message: str, status: str) -> None:
 
 
 def render_mode_legend() -> None:
-    render_feedback("Mode: > +0.30R Working | 0 to +0.30R Caution | -0.25R to 0 Weak | < -0.25R Failing", "idle")
+    render_feedback(
+        "Mode uses latest 15 valid R trades: > +0.30R Working | 0 to +0.30R Caution | "
+        "-0.10R to 0 Weak | < -0.10R Failing",
+        "idle",
+    )
 
 
 def format_optional_currency(value) -> str:
@@ -789,13 +794,92 @@ def strategy_metrics_column_config() -> dict:
         "r_ratio": st.column_config.NumberColumn("R Ratio", format="%.2f", width=72),
         "average_win_hold": st.column_config.NumberColumn("Win Hold", format="%.1f", width=78),
         "average_loss_hold": st.column_config.NumberColumn("Loss Hold", format="%.1f", width=82),
-        "rolling_10r_exp": st.column_config.TextColumn("10R Exp", width=82),
+        "rolling_mode_exp": st.column_config.TextColumn("15R Exp", width=82),
         "mode": st.column_config.TextColumn("Mode", width=82),
         "action": st.column_config.TextColumn("Action", width=122),
     }
 
 
-def render_trade_metrics(metrics: dict | None, strategy_metrics: pd.DataFrame | None) -> None:
+STRATEGY_ATTRIBUTION_DISPLAY_ROWS = [
+    ("Mode", "mode"),
+    ("Mode Basis", "mode_basis"),
+    ("Trend", "trend"),
+    ("Trend Driver", "trend_driver"),
+    ("Evidence", "evidence"),
+    ("Playbook", "playbook"),
+]
+
+
+def strategy_attribution_display_strategies(strategy_attribution: pd.DataFrame) -> list[str]:
+    strategies = []
+    existing = [str(strategy) for strategy in strategy_attribution.get("strategy", [])]
+    for strategy in STRATEGY_OPTIONS:
+        strategies.append(strategy)
+    for strategy in existing:
+        if strategy and strategy not in strategies:
+            strategies.append(strategy)
+    return strategies
+
+
+def strategy_attribution_display_value(value: object, *, key: str) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if key == "trend_driver":
+        return text.replace("Profit factor", "PF").replace("profit factor", "PF")
+    return text
+
+
+def strategy_attribution_display_frame(strategy_attribution: pd.DataFrame) -> pd.DataFrame:
+    strategies = strategy_attribution_display_strategies(strategy_attribution)
+    rows_by_strategy = {
+        str(row.get("strategy") or ""): row
+        for _, row in strategy_attribution.iterrows()
+    }
+    display_rows = []
+    for label, key in STRATEGY_ATTRIBUTION_DISPLAY_ROWS:
+        display_row = {"Metric": label}
+        for strategy in strategies:
+            source_row = rows_by_strategy.get(strategy, {})
+            display_row[strategy] = strategy_attribution_display_value(source_row.get(key), key=key)
+        display_rows.append(display_row)
+    return pd.DataFrame(display_rows, columns=["Metric", *strategies])
+
+
+def strategy_attribution_display_column_config(columns: list[str]) -> dict:
+    column_config = {"Metric": st.column_config.TextColumn("Metric", width=40)}
+    for column in columns:
+        if column == "Metric":
+            continue
+        column_config[column] = st.column_config.TextColumn(column, width=360)
+    return column_config
+
+
+def render_strategy_attribution(strategy_attribution: pd.DataFrame | None) -> None:
+    with st.expander("Strategy Attribution", expanded=False):
+        render_feedback(
+            "This panel answers: What is actually making or costing money? "
+            "Position sizing still comes from Mode and Action.",
+            "idle",
+        )
+        if strategy_attribution is None or strategy_attribution.empty:
+            render_feedback("No strategy attribution is available yet.", "idle")
+            return
+
+        display_frame = strategy_attribution_display_frame(strategy_attribution)
+        st.dataframe(
+            display_frame,
+            column_config=strategy_attribution_display_column_config(list(display_frame.columns)),
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def render_trade_metrics(
+    metrics: dict | None,
+    strategy_metrics: pd.DataFrame | None,
+    strategy_attribution: pd.DataFrame | None,
+) -> None:
     render_section("Trade Metrics", "Derived from stored Robinhood transactions.")
     if metrics is None:
         render_feedback("Upload a Robinhood CSV to populate trade metrics.", "idle")
@@ -850,6 +934,7 @@ def render_trade_metrics(metrics: dict | None, strategy_metrics: pd.DataFrame | 
         width="stretch",
     )
     render_mode_legend()
+    render_strategy_attribution(strategy_attribution)
 
 
 config = load_config()
@@ -936,6 +1021,7 @@ if "position_editor_revision" not in st.session_state:
 robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
 trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
 strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
+strategy_attribution = calculate_strategy_attribution(robinhood_derivation.closed_trades)
 total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
 
 apply_styles()
@@ -1109,6 +1195,7 @@ with st.expander("Robinhood Import", expanded=False):
         robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
         trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
         strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
+        strategy_attribution = calculate_strategy_attribution(robinhood_derivation.closed_trades)
         total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
         render_header(total_pnl, trade_metrics, header_container)
         st.session_state.robinhood_import_result = import_result
@@ -1221,4 +1308,4 @@ with st.expander("Robinhood Import", expanded=False):
             )
 
 with trade_metrics_container:
-    render_trade_metrics(trade_metrics, strategy_metrics)
+    render_trade_metrics(trade_metrics, strategy_metrics, strategy_attribution)
