@@ -265,11 +265,38 @@ def test_table_csv_and_json_render_same_ranked_rows():
     csv_output = render_csv(result)
     json_output = render_rank_result(result, "json")
     json_payload = json.loads(json_output)
+    table_header = table.splitlines()[1]
+    csv_header = csv_output.splitlines()[0].split(",")
 
-    assert "Strategy" in table
+    assert table_header.startswith("Symbol  Regime")
+    assert table_header.split()[:4] == ["Symbol", "Regime", "Mode", "Strategy"]
     assert "TEST" in table
     assert table.endswith("\n")
-    assert "strategy,mode,market_regime,symbol" in csv_output
+    assert csv_header[:14] == [
+        "symbol",
+        "market_regime",
+        "mode",
+        "strategy",
+        "price",
+        "stop",
+        "atr",
+        "stop_loss_percent",
+        "position_size",
+        "risk_percent",
+        "total_risk",
+        "shares",
+        "risk_in_atr",
+        "validation_error",
+    ]
+    assert csv_header[14:] == [
+        "price_source",
+        "stop_source",
+        "atr_source",
+        "market_data_feed",
+        "price_timestamp",
+        "stop_timestamp",
+        "atr_timestamp",
+    ]
     assert "TEST" in csv_output
     assert "rows" not in json_payload
     assert list(json_payload["groups"]) == ["EP", "5% BO", "BO"]
@@ -311,7 +338,7 @@ def test_table_and_csv_render_rows_by_strategy_group_order():
     assert table_lines.index("EP") < table_lines.index("5% BO") < table_lines.index("BO")
     assert table.index("EPA") < table.index("EPZ") < table.index("FIVE") < table.index("BOA")
     csv_lines = csv_output.splitlines()
-    assert [line.split(",")[3] for line in csv_lines[1:]] == ["EPA", "EPZ", "FIVE", "BOA"]
+    assert [line.split(",")[0] for line in csv_lines[1:]] == ["EPA", "EPZ", "FIVE", "BOA"]
 
 
 def test_storage_load_failure_returns_warning_and_unknown_mode(monkeypatch):
