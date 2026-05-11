@@ -30,7 +30,7 @@ def test_rank_endpoint_returns_csv():
 
     assert response.media_type == "text/csv"
     text = response.body.decode("utf-8")
-    assert "strategy,mode,market_regime,symbol" in text
+    assert text.startswith("symbol,market_regime,mode,strategy")
     assert "TEST" in text
 
 

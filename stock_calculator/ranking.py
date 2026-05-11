@@ -18,19 +18,19 @@ from stock_calculator.storage import load_planned_stops, load_robinhood_transact
 
 
 TABLE_COLUMNS = [
-    "strategy",
-    "mode",
-    "market_regime",
     "symbol",
+    "market_regime",
+    "mode",
+    "strategy",
     "price",
     "stop",
     "atr",
     "stop_loss_percent",
-    "risk_in_atr",
-    "shares",
     "position_size",
     "risk_percent",
     "total_risk",
+    "shares",
+    "risk_in_atr",
     "validation_error",
 ]
 
@@ -418,19 +418,19 @@ def _rank_row_sort_key(row: dict[str, object]) -> tuple[int, bool, float, str]:
 
 def _format_table_row(row: dict[str, object]) -> list[str]:
     return [
-        str(row.get("strategy") or ""),
-        str(row.get("mode") or ""),
-        str(row.get("market_regime") or ""),
         str(row.get("symbol") or ""),
+        str(row.get("market_regime") or ""),
+        str(row.get("mode") or ""),
+        str(row.get("strategy") or ""),
         _format_number(row.get("price")),
         _format_number(row.get("stop")),
         _format_number(row.get("atr")),
         _format_number(row.get("stop_loss_percent")),
-        _format_number(row.get("risk_in_atr")),
-        _format_integer(row.get("shares")),
         _format_number(row.get("position_size")),
         _format_number(row.get("risk_percent")),
         _format_number(row.get("total_risk")),
+        _format_integer(row.get("shares")),
+        _format_number(row.get("risk_in_atr")),
         str(row.get("validation_error") or ""),
     ]
 
