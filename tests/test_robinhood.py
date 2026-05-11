@@ -5,6 +5,7 @@ import pandas as pd
 
 from stock_calculator.robinhood import (
     PLANNED_STOP_COLUMNS,
+    calculate_strategy_attribution,
     calculate_strategy_metrics,
     calculate_total_realized_pnl,
     calculate_trade_metrics,
@@ -631,12 +632,20 @@ def test_calculate_strategy_metrics_groups_closed_trades_by_strategy():
     ]
 
 
-def _closed_trade(strategy="EP", sell_date="2026-04-01", r_multiple=0.0, planned_stop=90, buy_price=100):
+def _closed_trade(
+    strategy="EP",
+    sell_date="2026-04-01",
+    r_multiple=0.0,
+    planned_stop=90,
+    buy_price=100,
+    market_regime="",
+):
     return {
         "strategy": strategy,
         "sell_date": sell_date,
         "quantity": 1,
         "planned_stop": planned_stop,
+        "market_regime": market_regime,
         "buy_price": buy_price,
         "realized_pnl": (buy_price - planned_stop) * r_multiple,
         "realized_pnl_percent": r_multiple * 10,
@@ -644,84 +653,219 @@ def _closed_trade(strategy="EP", sell_date="2026-04-01", r_multiple=0.0, planned
     }
 
 
-def test_calculate_strategy_metrics_adds_rolling_10r_mode_and_action_from_r_multiples():
+def _closed_trade_window(r_multiples, *, strategy="EP", start="2026-04-01", regimes=None):
+    dates = pd.date_range(start=start, periods=len(r_multiples), freq="D")
+    regimes = regimes or [""] * len(r_multiples)
+    return [
+        _closed_trade(
+            strategy=strategy,
+            sell_date=date.date().isoformat(),
+            r_multiple=r_multiple,
+            market_regime=regime,
+        )
+        for date, r_multiple, regime in zip(dates, r_multiples, regimes, strict=True)
+    ]
+
+
+def test_calculate_strategy_metrics_adds_rolling_mode_and_action_from_r_multiples():
     closed_trades = pd.DataFrame(
-        [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.35) for day in range(1, 11)]
+        [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.35) for day in range(1, 16)]
     )
 
     result = calculate_strategy_metrics(closed_trades)
 
-    assert result[["rolling_10r_exp", "mode", "action"]].to_dict("records") == [
-        {"rolling_10r_exp": "+0.35R", "mode": "Working", "action": "Normal size"}
+    assert result[["rolling_mode_exp", "mode", "action"]].to_dict("records") == [
+        {"rolling_mode_exp": "+0.35R", "mode": "Working", "action": "Normal size"}
     ]
 
 
-def test_calculate_strategy_metrics_uses_latest_10_closed_trades_by_sell_date():
+def test_calculate_strategy_metrics_uses_latest_15_closed_trades_by_sell_date():
     old_large_winner = _closed_trade(sell_date="2026-04-01", r_multiple=10)
     latest_weak_trades = [
         _closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=-0.1)
-        for day in range(2, 12)
+        for day in range(2, 17)
     ]
     closed_trades = pd.DataFrame([*latest_weak_trades, old_large_winner])
 
     result = calculate_strategy_metrics(closed_trades)
 
-    assert result.iloc[0]["rolling_10r_exp"] == "-0.10R"
+    assert result.iloc[0]["rolling_mode_exp"] == "-0.10R"
     assert result.iloc[0]["mode"] == "Weak"
     assert result.iloc[0]["action"] == "Quarter size"
 
 
-def test_calculate_strategy_metrics_requires_10_closed_trades_for_rolling_10r():
+def test_calculate_strategy_metrics_requires_15_closed_trades_for_rolling_mode():
     closed_trades = pd.DataFrame(
-        [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=1) for day in range(1, 10)]
+        [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=1) for day in range(1, 15)]
     )
 
     result = calculate_strategy_metrics(closed_trades)
 
-    assert result.iloc[0]["rolling_10r_exp"] == "N/A"
+    assert result.iloc[0]["rolling_mode_exp"] == "N/A"
     assert result.iloc[0]["mode"] == "Unknown"
     assert result.iloc[0]["action"] == "Tiny size only"
 
 
-def test_calculate_strategy_metrics_requires_latest_10_trades_to_have_valid_r_risk():
-    trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(1, 11)]
+def test_calculate_strategy_metrics_requires_latest_15_trades_to_have_valid_r_risk():
+    trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(1, 16)]
     trades[-1]["planned_stop"] = 100
     closed_trades = pd.DataFrame(trades)
 
     result = calculate_strategy_metrics(closed_trades)
 
-    assert result.iloc[0]["rolling_10r_exp"] == "N/A"
+    assert result.iloc[0]["rolling_mode_exp"] == "N/A"
     assert result.iloc[0]["mode"] == "Unknown"
     assert result.iloc[0]["action"] == "Tiny size only"
 
 
-def test_calculate_strategy_metrics_maps_rolling_10r_thresholds():
+def test_calculate_strategy_metrics_maps_rolling_mode_thresholds():
     cases = [
         (0.30, "+0.30R", "Caution", "Half size"),
         (0.00, "+0.00R", "Caution", "Half size"),
-        (-0.25, "-0.25R", "Weak", "Quarter size"),
-        (-0.30, "-0.30R", "Failing", "Probe only / pause"),
+        (-0.10, "-0.10R", "Weak", "Quarter size"),
+        (-0.11, "-0.11R", "Failing", "Probe only / pause"),
     ]
 
     for r_multiple, expected_exp, expected_mode, expected_action in cases:
         closed_trades = pd.DataFrame(
-            [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=r_multiple) for day in range(1, 11)]
+            [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=r_multiple) for day in range(1, 16)]
         )
 
         result = calculate_strategy_metrics(closed_trades)
 
-        assert result.iloc[0]["rolling_10r_exp"] == expected_exp
+        assert result.iloc[0]["rolling_mode_exp"] == expected_exp
         assert result.iloc[0]["mode"] == expected_mode
         assert result.iloc[0]["action"] == expected_action
 
 
-def test_calculate_strategy_metrics_calculates_rolling_10r_per_strategy():
-    ep_trades = [_closed_trade(strategy="EP", sell_date=f"2026-04-{day:02d}", r_multiple=0.4) for day in range(1, 11)]
-    bo_trades = [_closed_trade(strategy="BO", sell_date=f"2026-04-{day:02d}", r_multiple=-0.3) for day in range(1, 11)]
+def test_calculate_strategy_metrics_calculates_rolling_mode_per_strategy():
+    ep_trades = [_closed_trade(strategy="EP", sell_date=f"2026-04-{day:02d}", r_multiple=0.4) for day in range(1, 16)]
+    bo_trades = [_closed_trade(strategy="BO", sell_date=f"2026-04-{day:02d}", r_multiple=-0.3) for day in range(1, 16)]
 
     result = calculate_strategy_metrics(pd.DataFrame([*bo_trades, *ep_trades]))
 
-    assert result[["strategy", "rolling_10r_exp", "mode", "action"]].to_dict("records") == [
-        {"strategy": "EP", "rolling_10r_exp": "+0.40R", "mode": "Working", "action": "Normal size"},
-        {"strategy": "BO", "rolling_10r_exp": "-0.30R", "mode": "Failing", "action": "Probe only / pause"},
+    assert result[["strategy", "rolling_mode_exp", "mode", "action"]].to_dict("records") == [
+        {"strategy": "EP", "rolling_mode_exp": "+0.40R", "mode": "Working", "action": "Normal size"},
+        {"strategy": "BO", "rolling_mode_exp": "-0.30R", "mode": "Failing", "action": "Probe only / pause"},
     ]
+
+
+def test_calculate_strategy_attribution_uses_same_mode_as_strategy_metrics():
+    trades = _closed_trade_window([-0.11] * 15)
+
+    strategy_metrics = calculate_strategy_metrics(pd.DataFrame(trades))
+    attribution = calculate_strategy_attribution(pd.DataFrame(trades))
+
+    assert attribution.iloc[0]["mode"] == strategy_metrics.iloc[0]["mode"] == "Failing"
+    assert attribution.iloc[0]["mode_basis"] == "15R Exp -0.11R"
+    assert attribution.iloc[0]["trend"] == "Need 30 trades"
+    assert "interpretation" not in attribution.columns
+
+
+def test_calculate_strategy_attribution_uses_latest_15_against_prior_15_disjoint_window():
+    old_trades = _closed_trade_window([-5.0] * 15, start="2026-01-01")
+    prior_trades = _closed_trade_window([0.2] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window([0.6] * 15, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*old_trades, *prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Working"
+    assert row["mode_basis"] == "15R Exp +0.60R"
+    assert row["trend"] == "Improving (+0.40R)"
+    assert row["trend_driver"] == "Winner size"
+    assert "Exp R 0.60 vs 0.20" in row["evidence"]
+
+
+def test_calculate_strategy_attribution_detects_weakening_strategy():
+    prior_trades = _closed_trade_window([1.0] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window([0.5] * 15, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Working"
+    assert row["trend"] == "Weakening (-0.50R)"
+    assert row["trend_driver"] == "Winner size"
+    assert "Exp R 0.50 vs 1.00" in row["evidence"]
+
+
+def test_calculate_strategy_attribution_detects_failing_strategy():
+    prior_trades = _closed_trade_window([1.0] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window([-0.3] * 15, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Failing"
+    assert row["trend"] == "Weakening (-1.30R)"
+    assert row["trend_driver"] in {"Hit rate", "Expectancy R"}
+
+
+def test_calculate_strategy_attribution_marks_flat_when_no_clear_driver():
+    trades = _closed_trade_window([0.2] * 30, start="2026-02-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame(trades))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Caution"
+    assert row["trend"] == "Flat (+0.00R)"
+    assert row["trend_driver"] == "No clear driver"
+    assert row["playbook"] == "Keep using existing Mode and Action sizing."
+
+
+def test_calculate_strategy_attribution_requires_15_trades_per_strategy():
+    trades = _closed_trade_window([0.4] * 14)
+
+    result = calculate_strategy_attribution(pd.DataFrame(trades))
+
+    assert result.iloc[0][["mode", "mode_basis", "trend", "trend_driver", "evidence"]].to_dict() == {
+        "mode": "Unknown",
+        "mode_basis": "Need 15 valid R trades",
+        "trend": "Need 15 trades",
+        "trend_driver": "Need 15 trades",
+        "evidence": "14 closed trades",
+    }
+
+
+def test_calculate_strategy_attribution_reports_regime_driver_when_enough_tagged_trades():
+    prior_trades = _closed_trade_window([0.3] * 15, start="2026-02-01", regimes=["GO"] * 15)
+    recent_trades = _closed_trade_window(
+        [-1.0, -1.0, -1.0, -1.0, -1.0, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3],
+        start="2026-03-01",
+        regimes=["NO-GO", "NO-GO", "NO-GO", "NO-GO", "NO-GO", "GO", "GO", "GO", "GO", "GO", "GO", "GO", "GO", "GO", "GO"],
+    )
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Failing"
+    assert row["trend_driver"] == "Regime filter: NO-GO"
+    assert row["playbook"] == "Tighten entry regime filter before resuming normal activity."
+
+
+def test_calculate_strategy_attribution_ignores_regime_driver_without_enough_regime_trades():
+    prior_trades = _closed_trade_window([0.3] * 15, start="2026-02-01", regimes=["GO"] * 15)
+    recent_trades = _closed_trade_window(
+        [-2.0, *([0.1] * 14)],
+        start="2026-03-01",
+        regimes=["NO-GO", *(["GO"] * 14)],
+    )
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    assert not result.iloc[0]["trend_driver"].startswith("Regime")
+
+
+def test_calculate_strategy_attribution_detects_recovering_trend():
+    prior_trades = _closed_trade_window([-0.44] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window([-0.01] * 15, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Weak"
+    assert row["mode_basis"] == "15R Exp -0.01R"
+    assert row["trend"] == "Recovering (+0.43R)"
+    assert row["trend_driver"] == "Loss control"
+    assert "Exp R -0.01 vs -0.44" in row["evidence"]

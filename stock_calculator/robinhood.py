@@ -84,6 +84,10 @@ OPEN_LOT_COLUMNS = [
 
 UNMATCHED_SELL_COLUMNS = ["symbol", "sell_date", "quantity", "sell_price"]
 IMPORT_ISSUE_COLUMNS = ["row_number", "issue", "raw_row"]
+STRATEGY_MODE_WINDOW = 15
+STRATEGY_MODE_WORKING_THRESHOLD = 0.30
+STRATEGY_MODE_FAILING_THRESHOLD = -0.10
+ATTRIBUTION_TREND_THRESHOLD = 0.25
 STRATEGY_METRIC_COLUMNS = [
     "strategy",
     "trade_count",
@@ -98,9 +102,18 @@ STRATEGY_METRIC_COLUMNS = [
     "r_ratio",
     "average_win_hold",
     "average_loss_hold",
-    "rolling_10r_exp",
+    "rolling_mode_exp",
     "mode",
     "action",
+]
+STRATEGY_ATTRIBUTION_COLUMNS = [
+    "strategy",
+    "mode",
+    "mode_basis",
+    "trend",
+    "trend_driver",
+    "evidence",
+    "playbook",
 ]
 
 
@@ -188,25 +201,31 @@ def calculate_total_realized_pnl(closed_trades: pd.DataFrame) -> float:
     return round(float(realized_pnl.dropna().sum()), 2)
 
 
-def calculate_rolling_10r_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
-    rolling_10r = _calculate_rolling_10r_exp(closed_trades)
-    if rolling_10r is None:
-        return {"rolling_10r_exp": "N/A", "mode": "Unknown", "action": "Tiny size only"}
+def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
+    rolling_exp = _calculate_rolling_mode_exp(closed_trades)
+    if rolling_exp is None:
+        return {"rolling_mode_exp": "N/A", "mode": "Unknown", "action": "Tiny size only"}
+    rolling_exp = round(rolling_exp, 2)
 
-    if rolling_10r > 0.30:
+    if rolling_exp > STRATEGY_MODE_WORKING_THRESHOLD:
         mode = "Working"
         action = "Normal size"
-    elif rolling_10r >= 0:
+    elif rolling_exp >= 0:
         mode = "Caution"
         action = "Half size"
-    elif rolling_10r >= -0.25:
+    elif rolling_exp >= STRATEGY_MODE_FAILING_THRESHOLD:
         mode = "Weak"
         action = "Quarter size"
     else:
         mode = "Failing"
         action = "Probe only / pause"
 
-    return {"rolling_10r_exp": f"{rolling_10r:+.2f}R", "mode": mode, "action": action}
+    return {"rolling_mode_exp": f"{rolling_exp:+.2f}R", "mode": mode, "action": action}
+
+
+def calculate_rolling_10r_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
+    rolling_mode = calculate_rolling_mode(closed_trades)
+    return {**rolling_mode, "rolling_10r_exp": rolling_mode["rolling_mode_exp"]}
 
 
 def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
@@ -225,7 +244,7 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
         metrics = calculate_trade_metrics(grouped_trades)
         if metrics["trade_count"] == 0:
             continue
-        rolling_10r_mode = calculate_rolling_10r_mode(grouped_trades)
+        rolling_mode = calculate_rolling_mode(grouped_trades)
         rows.append(
             {
                 "strategy": strategy,
@@ -241,9 +260,9 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
                 "r_ratio": metrics["r_ratio"],
                 "average_win_hold": metrics["average_win_hold"],
                 "average_loss_hold": metrics["average_loss_hold"],
-                "rolling_10r_exp": rolling_10r_mode["rolling_10r_exp"],
-                "mode": rolling_10r_mode["mode"],
-                "action": rolling_10r_mode["action"],
+                "rolling_mode_exp": rolling_mode["rolling_mode_exp"],
+                "mode": rolling_mode["mode"],
+                "action": rolling_mode["action"],
             }
         )
 
@@ -252,13 +271,282 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=STRATEGY_METRIC_COLUMNS)
 
 
-def _calculate_rolling_10r_exp(closed_trades: pd.DataFrame) -> float | None:
-    if len(closed_trades) < 10:
+def calculate_strategy_attribution(closed_trades: pd.DataFrame) -> pd.DataFrame:
+    if closed_trades.empty:
+        return pd.DataFrame(columns=STRATEGY_ATTRIBUTION_COLUMNS)
+
+    trades = closed_trades.copy()
+    strategy_values = trades["strategy"] if "strategy" in trades.columns else pd.Series([""] * len(trades), index=trades.index)
+    trades["strategy_group"] = strategy_values.apply(display_strategy)
+    rows = []
+    grouped_by_strategy = dict(tuple(trades.groupby("strategy_group", sort=False, dropna=False)))
+    for strategy in [*STRATEGY_OPTIONS, UNCLASSIFIED_STRATEGY]:
+        grouped_trades = grouped_by_strategy.get(strategy)
+        if grouped_trades is None:
+            continue
+        rows.append(_strategy_attribution_row(strategy, grouped_trades))
+
+    if not rows:
+        return pd.DataFrame(columns=STRATEGY_ATTRIBUTION_COLUMNS)
+    return pd.DataFrame(rows, columns=STRATEGY_ATTRIBUTION_COLUMNS)
+
+
+def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> dict[str, str]:
+    ordered = grouped_trades.copy()
+    ordered["_original_order"] = range(len(ordered))
+    ordered["sell_date"] = pd.to_datetime(ordered.get("sell_date"), errors="coerce")
+    ordered = ordered.sort_values(["sell_date", "_original_order"], kind="mergesort")
+
+    trade_count = len(ordered)
+    if trade_count < STRATEGY_MODE_WINDOW:
+        return {
+            "strategy": strategy,
+            "mode": "Unknown",
+            "mode_basis": f"Need {STRATEGY_MODE_WINDOW} valid R trades",
+            "trend": f"Need {STRATEGY_MODE_WINDOW} trades",
+            "trend_driver": f"Need {STRATEGY_MODE_WINDOW} trades",
+            "evidence": f"{trade_count} closed trades",
+            "playbook": "Keep using existing Mode and Action sizing.",
+        }
+
+    recent = ordered.tail(STRATEGY_MODE_WINDOW)
+    recent_metrics = calculate_trade_metrics(recent)
+    rolling_mode = calculate_rolling_mode(ordered)
+    prior = ordered.iloc[-(STRATEGY_MODE_WINDOW * 2) : -STRATEGY_MODE_WINDOW]
+    prior_metrics = calculate_trade_metrics(prior) if len(prior) >= STRATEGY_MODE_WINDOW else None
+    deltas = {
+        "profit_factor": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "profit_factor"),
+        "expectancy_r": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "expectancy_r"),
+        "win_rate": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "win_rate"),
+        "average_win_r": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "average_win_r"),
+        "average_loss_r": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "average_loss_r"),
+        "loss_streak": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "loss_streak"),
+    }
+    mode = rolling_mode["mode"]
+    mode_basis = _mode_basis(rolling_mode)
+    trend = _attribution_trend(mode, deltas)
+    regime_driver = _regime_driver(recent, mode, trend)
+    trend_driver = regime_driver or _trend_metric_driver(mode, trend, deltas, recent_metrics)
+    evidence = _attribution_evidence(recent_metrics, prior_metrics, deltas)
+    playbook = _attribution_playbook(mode, trend_driver)
+
+    return {
+        "strategy": strategy,
+        "mode": mode,
+        "mode_basis": mode_basis,
+        "trend": trend,
+        "trend_driver": trend_driver,
+        "evidence": evidence,
+        "playbook": playbook,
+    }
+
+
+def _mode_basis(rolling_mode: dict[str, str]) -> str:
+    rolling_exp = rolling_mode.get("rolling_mode_exp")
+    if rolling_exp == "N/A" or not rolling_exp:
+        return f"Need {STRATEGY_MODE_WINDOW} valid R trades"
+    return f"{STRATEGY_MODE_WINDOW}R Exp {rolling_exp}"
+
+
+def _metric_delta_from_optional_prior(
+    recent_metrics: dict[str, float | int | None],
+    prior_metrics: dict[str, float | int | None] | None,
+    key: str,
+) -> float | None:
+    if prior_metrics is None:
+        return None
+    return _metric_delta(recent_metrics.get(key), prior_metrics.get(key))
+
+
+def _metric_delta(recent_value: Any, prior_value: Any) -> float | None:
+    if recent_value is None or prior_value is None or pd.isna(recent_value) or pd.isna(prior_value):
+        return None
+    return round(float(recent_value) - float(prior_value), 2)
+
+
+def _attribution_trend(mode: str, deltas: dict[str, float | None]) -> str:
+    expectancy_delta = deltas.get("expectancy_r")
+    if expectancy_delta is None:
+        return f"Need {STRATEGY_MODE_WINDOW * 2} trades"
+    if _delta_at_or_above(expectancy_delta, ATTRIBUTION_TREND_THRESHOLD):
+        label = "Recovering" if mode in {"Weak", "Failing"} else "Improving"
+        return f"{label} ({expectancy_delta:+.2f}R)"
+    if _delta_at_or_below(expectancy_delta, -ATTRIBUTION_TREND_THRESHOLD):
+        return f"Weakening ({expectancy_delta:+.2f}R)"
+    return f"Flat ({expectancy_delta:+.2f}R)"
+
+
+def _trend_metric_driver(
+    mode: str,
+    trend: str,
+    deltas: dict[str, float | None],
+    metrics: dict[str, float | int | None],
+) -> str:
+    trend_label = _trend_label(trend)
+    if trend_label in {"Improving", "Recovering"}:
+        candidates = [
+            ("Loss control", deltas.get("average_loss_r"), 0.20),
+            ("Winner size", deltas.get("average_win_r"), 0.20),
+            ("Hit rate", deltas.get("win_rate"), 10.0),
+            ("Profit factor", deltas.get("profit_factor"), 0.30),
+            ("Expectancy R", deltas.get("expectancy_r"), 0.25),
+        ]
+        for label, delta, threshold in candidates:
+            if _delta_at_or_above(delta, threshold):
+                return label
+        return "No clear driver"
+
+    if trend_label == "Weakening":
+        candidates = [
+            ("Loss control", deltas.get("average_loss_r"), -0.20),
+            ("Winner size", deltas.get("average_win_r"), -0.20),
+            ("Hit rate", deltas.get("win_rate"), -10.0),
+            ("Loss streak", deltas.get("loss_streak"), 2.0),
+            ("Profit factor", deltas.get("profit_factor"), -0.30),
+            ("Expectancy R", deltas.get("expectancy_r"), -ATTRIBUTION_TREND_THRESHOLD),
+        ]
+        for label, delta, threshold in candidates:
+            if label == "Loss streak":
+                if _delta_at_or_above(delta, threshold):
+                    return label
+            elif _delta_at_or_below(delta, threshold):
+                return label
+
+    return "No clear driver"
+
+
+def _regime_driver(recent: pd.DataFrame, mode: str, trend: str) -> str | None:
+    if "market_regime" not in recent.columns:
+        return None
+
+    tagged = recent.copy()
+    tagged["market_regime"] = tagged["market_regime"].fillna("").astype(str).str.strip()
+    tagged = tagged[tagged["market_regime"] != ""]
+    if len(tagged) < 6:
+        return None
+
+    overall = calculate_trade_metrics(tagged).get("expectancy_r")
+    if overall is None or pd.isna(overall):
+        return None
+
+    best_regime = None
+    worst_regime = None
+    best_expectancy = None
+    worst_expectancy = None
+    for regime, rows in tagged.groupby("market_regime", sort=False):
+        if len(rows) < 3:
+            continue
+        expectancy = calculate_trade_metrics(rows).get("expectancy_r")
+        if expectancy is None or pd.isna(expectancy):
+            continue
+        if best_expectancy is None or expectancy > best_expectancy:
+            best_regime = regime
+            best_expectancy = expectancy
+        if worst_expectancy is None or expectancy < worst_expectancy:
+            worst_regime = regime
+            worst_expectancy = expectancy
+
+    trend_label = _trend_label(trend)
+    if (mode in {"Weak", "Failing"} or trend_label == "Weakening") and worst_regime and worst_expectancy is not None:
+        other_expectancy = _expectancy_excluding_regime(tagged, worst_regime)
+        if other_expectancy is not None and worst_expectancy <= other_expectancy - 0.25:
+            return f"Regime filter: {worst_regime}"
+    if best_regime and best_expectancy is not None:
+        other_expectancy = _expectancy_excluding_regime(tagged, best_regime)
+        if other_expectancy is not None and best_expectancy >= other_expectancy + 0.25:
+            return f"Regime strength: {best_regime}"
+    return None
+
+
+def _expectancy_excluding_regime(tagged: pd.DataFrame, regime: str) -> float | None:
+    others = tagged[tagged["market_regime"] != regime]
+    if len(others) < 3:
+        return None
+    expectancy = calculate_trade_metrics(others).get("expectancy_r")
+    if expectancy is None or pd.isna(expectancy):
+        return None
+    return float(expectancy)
+
+
+def _attribution_evidence(
+    recent_metrics: dict[str, float | int | None],
+    prior_metrics: dict[str, float | int | None] | None,
+    deltas: dict[str, float | None],
+) -> str:
+    if prior_metrics is None:
+        pf_text = _metric_value("PF", recent_metrics.get("profit_factor"))
+        exp_text = _metric_value("Exp R", recent_metrics.get("expectancy_r"))
+    else:
+        pf_text = _metric_comparison("PF", recent_metrics.get("profit_factor"), prior_metrics.get("profit_factor"))
+        exp_text = _metric_comparison("Exp R", recent_metrics.get("expectancy_r"), prior_metrics.get("expectancy_r"))
+    win_text = _delta_text("Win rate", deltas.get("win_rate"), suffix=" pts")
+    loss_text = _delta_text("Avg loss R", deltas.get("average_loss_r"), signed=True)
+    return " | ".join(part for part in [pf_text, exp_text, win_text, loss_text] if part)
+
+
+def _metric_value(label: str, value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return f"{label} {_format_metric_value(value)}"
+
+
+def _metric_comparison(label: str, recent_value: Any, prior_value: Any) -> str:
+    if recent_value is None or prior_value is None or pd.isna(recent_value) or pd.isna(prior_value):
+        return ""
+    return f"{label} {_format_metric_value(recent_value)} vs {_format_metric_value(prior_value)}"
+
+
+def _delta_text(label: str, delta: float | None, *, suffix: str = "", signed: bool = False) -> str:
+    if delta is None:
+        return ""
+    if signed:
+        return f"{label} {delta:+.2f}{suffix}"
+    return f"{label} {delta:+.1f}{suffix}"
+
+
+def _format_metric_value(value: Any) -> str:
+    return f"{float(value):.2f}"
+
+
+def _trend_label(trend: str) -> str:
+    return trend.split(" ", maxsplit=1)[0]
+
+
+def _attribution_playbook(mode: str, trend_driver: str) -> str:
+    if mode in {"Working", "Caution"}:
+        return "Keep using existing Mode and Action sizing."
+    if mode == "Unknown":
+        return "Keep using existing Mode and Action sizing."
+    if trend_driver == "No clear driver":
+        return "Keep risk reduced until mode improves."
+    if trend_driver.startswith("Regime filter"):
+        return "Tighten entry regime filter before resuming normal activity."
+    if trend_driver == "Loss control":
+        return "Tighten stop discipline and avoid entries where risk can expand."
+    if trend_driver == "Winner size":
+        return "Require cleaner reward/risk and avoid taking profits too quickly."
+    if trend_driver == "Hit rate":
+        return "Increase entry selectivity and reduce marginal setups."
+    if trend_driver == "Loss streak":
+        return "Probe only or pause until the setup stabilizes."
+    return "Keep risk reduced until mode improves."
+
+
+def _delta_at_or_above(delta: float | None, threshold: float) -> bool:
+    return delta is not None and delta >= threshold
+
+
+def _delta_at_or_below(delta: float | None, threshold: float) -> bool:
+    return delta is not None and delta <= threshold
+
+
+def _calculate_rolling_mode_exp(closed_trades: pd.DataFrame) -> float | None:
+    if len(closed_trades) < STRATEGY_MODE_WINDOW:
         return None
 
     trades = closed_trades.copy()
     trades["sell_date"] = pd.to_datetime(trades.get("sell_date"), errors="coerce")
-    trades = trades.sort_values("sell_date", kind="mergesort").tail(10).copy()
+    trades = trades.sort_values("sell_date", kind="mergesort").tail(STRATEGY_MODE_WINDOW).copy()
 
     for column in ["realized_pnl", "buy_price", "planned_stop", "quantity"]:
         trades[column] = pd.to_numeric(trades.get(column), errors="coerce")
@@ -266,10 +554,10 @@ def _calculate_rolling_10r_exp(closed_trades: pd.DataFrame) -> float | None:
     trades["initial_risk"] = (trades["buy_price"] - trades["planned_stop"]) * trades["quantity"]
     trades["r_multiple"] = trades["realized_pnl"] / trades["initial_risk"]
     valid_r_multiples = trades.loc[trades["initial_risk"] > 0, "r_multiple"].dropna()
-    if len(valid_r_multiples) != 10:
+    if len(valid_r_multiples) != STRATEGY_MODE_WINDOW:
         return None
 
-    return float(valid_r_multiples.sum()) / 10
+    return float(valid_r_multiples.sum()) / STRATEGY_MODE_WINDOW
 
 
 def parse_robinhood_csv(source: str | Path | TextIO | Any) -> ImportResult:
