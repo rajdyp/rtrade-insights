@@ -306,7 +306,7 @@ def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> di
             "trend": f"Need {STRATEGY_MODE_WINDOW} trades",
             "trend_driver": f"Need {STRATEGY_MODE_WINDOW} trades",
             "evidence": f"{trade_count} closed trades",
-            "playbook": "Keep using existing Mode and Action sizing.",
+            "playbook": "Keep using Market Regime and Strategy Mode sizing.",
         }
 
     recent = ordered.tail(STRATEGY_MODE_WINDOW)
@@ -514,9 +514,9 @@ def _trend_label(trend: str) -> str:
 
 def _attribution_playbook(mode: str, trend_driver: str) -> str:
     if mode in {"Working", "Caution"}:
-        return "Keep using existing Mode and Action sizing."
+        return "Keep using Market Regime and Strategy Mode sizing."
     if mode == "Unknown":
-        return "Keep using existing Mode and Action sizing."
+        return "Keep using Market Regime and Strategy Mode sizing."
     if trend_driver == "No clear driver":
         return "Keep risk reduced until mode improves."
     if trend_driver.startswith("Regime filter"):

@@ -811,7 +811,7 @@ def test_calculate_strategy_attribution_marks_flat_when_no_clear_driver():
     assert row["mode"] == "Caution"
     assert row["trend"] == "Flat (+0.00R)"
     assert row["trend_driver"] == "No clear driver"
-    assert row["playbook"] == "Keep using existing Mode and Action sizing."
+    assert row["playbook"] == "Keep using Market Regime and Strategy Mode sizing."
 
 
 def test_calculate_strategy_attribution_requires_15_trades_per_strategy():

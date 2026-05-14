@@ -10,6 +10,9 @@ CONFIG_PATH = Path("config.toml")
 DEFAULT_PORTFOLIO_AMOUNT = 20_000.0
 DEFAULT_RISK_PERCENT = 0.5
 DEFAULT_MARKET_REGIME = "GO"
+DEFAULT_IEX_SIZING_PRICE_BUFFER_PERCENT = 0.25
+DEFAULT_IEX_SIZING_PRICE_BUFFER_MIN = 0.05
+DEFAULT_IEX_SIZING_PRICE_BUFFER_MAX = 0.10
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,9 @@ class AppConfig:
     sizing_portfolio_amount: float = DEFAULT_PORTFOLIO_AMOUNT
     risk_percent: float = DEFAULT_RISK_PERCENT
     market_regime: str = DEFAULT_MARKET_REGIME
+    iex_sizing_price_buffer_percent: float = DEFAULT_IEX_SIZING_PRICE_BUFFER_PERCENT
+    iex_sizing_price_buffer_min: float = DEFAULT_IEX_SIZING_PRICE_BUFFER_MIN
+    iex_sizing_price_buffer_max: float = DEFAULT_IEX_SIZING_PRICE_BUFFER_MAX
 
 
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
@@ -41,6 +47,18 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
         sizing_portfolio_amount=sizing_portfolio_amount,
         risk_percent=_positive_float(defaults.get("risk_percent"), DEFAULT_RISK_PERCENT),
         market_regime=_market_regime(defaults.get("market_regime"), DEFAULT_MARKET_REGIME),
+        iex_sizing_price_buffer_percent=_positive_float(
+            defaults.get("iex_sizing_price_buffer_percent"),
+            DEFAULT_IEX_SIZING_PRICE_BUFFER_PERCENT,
+        ),
+        iex_sizing_price_buffer_min=_positive_float(
+            defaults.get("iex_sizing_price_buffer_min"),
+            DEFAULT_IEX_SIZING_PRICE_BUFFER_MIN,
+        ),
+        iex_sizing_price_buffer_max=_positive_float(
+            defaults.get("iex_sizing_price_buffer_max"),
+            DEFAULT_IEX_SIZING_PRICE_BUFFER_MAX,
+        ),
     )
 
 

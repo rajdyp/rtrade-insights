@@ -53,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     research.set_defaults(handler=_handle_research)
 
     rank = subparsers.add_parser("rank", help="Rank grouped candidates from a file.")
-    rank.add_argument("--file", type=Path, required=True, help="Grouped candidate file with SYMBOL PRICE STOP ATR%%.")
+    rank.add_argument("--file", type=Path, required=True, help="Grouped candidate file with strategy headers and candidate rows.")
     rank.add_argument("--format", choices=SUPPORTED_FORMATS, default="table", help="Output format. Default: table")
     rank.add_argument("--enrich", action="store_true", help="Fetch missing price, stop, and ATR%% from Alpaca market data.")
     rank.add_argument(
