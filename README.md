@@ -32,6 +32,9 @@ portfolio_amount = 20000.0
 sizing_portfolio_amount = 20000.0
 risk_percent = 0.5
 market_regime = "GO"
+iex_sizing_price_buffer_percent = 0.25
+iex_sizing_price_buffer_min = 0.05
+iex_sizing_price_buffer_max = 0.10
 ```
 
 `market_regime` supports `GO`, `SELECTIVE GO`, and `NO-GO`.
@@ -126,7 +129,20 @@ export APCA_API_SECRET_KEY="your_secret_key"
 .venv/bin/python -m stock_calculator.cli rank --file rank_candidates.txt --enrich
 ```
 
+With `--enrich`, compact rows can omit Alpaca-derived values:
+
+```text
+BO
+RIGL 27.83 4.54
+
+EP
+RIGL 27.83 4.54
+```
+
+For `BO`, `SYMBOL VALUE ATR%` means Alpaca price, manual stop, and manual ATR %. For `EP` and `5% BO`, `VALUE` means manual LOD; stop is calculated from that LOD with the same low-buffer formula used for Alpaca lows.
+
 The default Alpaca feed is `iex`; use `--feed delayed_sip` or `--feed sip` only if your Alpaca plan supports it.
+When enrichment fills price from the default `iex` feed, ranking uses a conservative sizing price to reduce oversizing from stale or thin prints: `raw_price + min(max(raw_price * 0.25%, $0.05), $0.10)`. Manual prices, `delayed_sip`, and `sip` are sized exactly.
 
 ## Local API
 

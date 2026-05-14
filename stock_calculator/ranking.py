@@ -36,6 +36,8 @@ TABLE_COLUMNS = [
 
 METADATA_COLUMNS = [
     "price_source",
+    "raw_price",
+    "sizing_price_buffer",
     "stop_source",
     "atr_source",
     "market_data_feed",
@@ -89,6 +91,8 @@ class ParsedCandidate:
     price_timestamp: str = ""
     stop_timestamp: str = ""
     atr_timestamp: str = ""
+    raw_price: float | None = None
+    sizing_price_buffer: float | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +146,7 @@ def parse_rank_text(text: str, *, enrich: bool = False) -> tuple[list[ParsedCand
             continue
 
         try:
-            price, stop, atr = _parse_rank_values(parts, enrich=enrich)
+            price, stop, atr, stop_source = _parse_rank_values(parts, strategy=current_strategy, enrich=enrich)
         except ValueError:
             errors.append(ParseError(line_number, _numeric_error_message(parts, enrich=enrich), raw_line))
             continue
@@ -156,7 +160,7 @@ def parse_rank_text(text: str, *, enrich: bool = False) -> tuple[list[ParsedCand
                 stop=stop,
                 atr=atr,
                 price_source="manual" if price is not None else "",
-                stop_source="manual" if stop is not None else "",
+                stop_source=stop_source,
                 atr_source="manual" if atr is not None else "",
             )
         )
@@ -186,6 +190,7 @@ def rank_candidates(
             candidates,
             feed=feed,
             today=today,
+            config=config,
             market_data_provider=market_data_provider,
         )
         errors.extend(enrichment_errors)
@@ -236,11 +241,13 @@ def enrich_rank_candidates(
     *,
     feed: str = "iex",
     today: date | None = None,
+    config: AppConfig | None = None,
     market_data_provider: Any | None = None,
 ) -> tuple[list[ParsedCandidate], list[ParseError]]:
     if feed not in SUPPORTED_FEEDS:
         raise ValueError("Unsupported Alpaca feed. Use iex, delayed_sip, or sip.")
 
+    config = config or load_config()
     provider = market_data_provider or AlpacaMarketDataClient.from_env()
     symbols = [
         candidate.symbol
@@ -261,24 +268,33 @@ def enrich_rank_candidates(
             errors.append(ParseError(candidate.line, f"Could not enrich {candidate.symbol}; no Alpaca data returned.", candidate.symbol))
             continue
 
-        price = candidate.price if candidate.price is not None else data.price
-        if price is None:
+        raw_price = candidate.price if candidate.price is not None else data.price
+        if raw_price is None:
             errors.append(ParseError(candidate.line, f"Could not enrich {candidate.symbol}; missing latest price.", candidate.symbol))
             continue
 
         stop = candidate.stop
         stop_timestamp = candidate.stop_timestamp
-        if stop is None:
+        if candidate.stop_source == "manual_low_buffer":
+            stop = fallback_stop_from_low(float(stop), raw_price)
+        elif stop is None:
             if data.today_low is None:
                 errors.append(ParseError(candidate.line, f"Could not enrich {candidate.symbol}; missing today's low.", candidate.symbol))
                 continue
-            stop = fallback_stop_from_low(data.today_low, price)
+            stop = fallback_stop_from_low(data.today_low, raw_price)
             stop_timestamp = data.low_timestamp
 
         atr = candidate.atr if candidate.atr is not None else data.atr_percent
         if atr is None:
             errors.append(ParseError(candidate.line, f"Could not enrich {candidate.symbol}; missing 21-day ATR%.", candidate.symbol))
             continue
+
+        price, sizing_price_buffer = _sizing_price(
+            raw_price,
+            feed=feed,
+            price_from_alpaca=candidate.price is None,
+            config=config,
+        )
 
         enriched.append(
             ParsedCandidate(
@@ -295,6 +311,8 @@ def enrich_rank_candidates(
                 price_timestamp=candidate.price_timestamp or (data.price_timestamp if candidate.price is None else ""),
                 stop_timestamp=stop_timestamp,
                 atr_timestamp=candidate.atr_timestamp or (data.atr_timestamp if candidate.atr is None else ""),
+                raw_price=raw_price if sizing_price_buffer is not None else None,
+                sizing_price_buffer=sizing_price_buffer,
             )
         )
 
@@ -304,6 +322,26 @@ def enrich_rank_candidates(
 def fallback_stop_from_low(today_low: float, price: float) -> float:
     buffer = min(max(0.10, price * 0.002), 1.00)
     return round(today_low + buffer, 2)
+
+
+def _sizing_price(
+    raw_price: float,
+    *,
+    feed: str,
+    price_from_alpaca: bool,
+    config: AppConfig,
+) -> tuple[float, float | None]:
+    if not price_from_alpaca or feed != "iex":
+        return raw_price, None
+
+    buffer = min(
+        max(
+            raw_price * (config.iex_sizing_price_buffer_percent / 100),
+            config.iex_sizing_price_buffer_min,
+        ),
+        config.iex_sizing_price_buffer_max,
+    )
+    return round(raw_price + buffer, 2), round(buffer, 2)
 
 
 def render_rank_result(result: RankResult, output_format: str = "table") -> str:
@@ -390,6 +428,8 @@ def _rank_row(
         "total_risk": _optional_float(calculated["risk_amount"]),
         "validation_error": str(calculated["validation_error"] or ""),
         "price_source": candidate.price_source,
+        "raw_price": candidate.raw_price,
+        "sizing_price_buffer": candidate.sizing_price_buffer,
         "stop_source": candidate.stop_source,
         "atr_source": candidate.atr_source,
         "market_data_feed": candidate.market_data_feed,
@@ -436,28 +476,36 @@ def _format_table_row(row: dict[str, object]) -> list[str]:
 
 
 def _allowed_part_counts(enrich: bool) -> set[int]:
-    return {1, 2, 4} if enrich else {4}
+    return {1, 2, 3, 4} if enrich else {4}
 
 
 def _expected_row_message(enrich: bool) -> str:
     if enrich:
-        return "Expected row format: SYMBOL, SYMBOL STOP, or SYMBOL PRICE STOP ATR%."
+        return "Expected row format: SYMBOL, SYMBOL VALUE, SYMBOL VALUE ATR%, or SYMBOL PRICE STOP ATR%."
     return "Expected row format: SYMBOL PRICE STOP ATR%."
 
 
-def _parse_rank_values(parts: list[str], *, enrich: bool) -> tuple[float | None, float | None, float | None]:
+def _parse_rank_values(
+    parts: list[str], *, strategy: str, enrich: bool
+) -> tuple[float | None, float | None, float | None, str]:
     if len(parts) == 4:
-        return float(parts[1]), float(parts[2]), float(parts[3])
+        return float(parts[1]), float(parts[2]), float(parts[3]), "manual"
+    if enrich and len(parts) == 3:
+        stop_source = "manual" if strategy == "BO" else "manual_low_buffer"
+        return None, float(parts[1]), float(parts[2]), stop_source
     if enrich and len(parts) == 2:
-        return None, float(parts[1]), None
+        stop_source = "manual" if strategy == "BO" else "manual_low_buffer"
+        return None, float(parts[1]), None, stop_source
     if enrich and len(parts) == 1:
-        return None, None, None
+        return None, None, None, ""
     raise ValueError
 
 
 def _numeric_error_message(parts: list[str], *, enrich: bool) -> str:
     if enrich and len(parts) == 2:
-        return "Stop must be numeric."
+        return "Value must be numeric."
+    if enrich and len(parts) == 3:
+        return "Value and ATR must be numeric."
     return "Price, stop, and ATR must be numeric."
 
 

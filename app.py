@@ -859,7 +859,7 @@ def render_strategy_attribution(strategy_attribution: pd.DataFrame | None) -> No
     with st.expander("Strategy Attribution", expanded=False):
         render_feedback(
             "This panel answers: What is actually making or costing money? "
-            "Position sizing still comes from Mode and Action.",
+            "Position sizing is driven by Market Regime and Strategy Mode.",
             "idle",
         )
         if strategy_attribution is None or strategy_attribution.empty:

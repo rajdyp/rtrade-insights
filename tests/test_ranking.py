@@ -53,13 +53,15 @@ def test_parse_rank_text_reports_malformed_rows_with_line_numbers():
     ]
 
 
-def test_parse_rank_text_reads_enriched_symbol_and_manual_stop_rows():
+def test_parse_rank_text_reads_enriched_symbol_and_strategy_based_value_rows():
     candidates, errors = parse_rank_text(
         """
         EP
         pins
         APP 100.25
         NVDA 921.40 890.00 3.6
+        BO
+        RIGL 27.83 4.54
         """,
         enrich=True,
     )
@@ -69,8 +71,11 @@ def test_parse_rank_text_reads_enriched_symbol_and_manual_stop_rows():
         ("PINS", None, None, None),
         ("APP", None, 100.25, None),
         ("NVDA", 921.40, 890.00, 3.6),
+        ("RIGL", None, 27.83, 4.54),
     ]
-    assert candidates[1].stop_source == "manual"
+    assert candidates[1].stop_source == "manual_low_buffer"
+    assert candidates[3].stop_source == "manual"
+    assert candidates[3].atr_source == "manual"
 
 
 def test_parse_rank_text_rejects_partial_rows_without_enrichment():
@@ -174,6 +179,8 @@ def test_rank_candidates_enriches_symbol_only_rows_and_records_sources():
     row = result.rows[0]
     assert provider.calls == [(["TEST"], "delayed_sip", date(2026, 5, 7))]
     assert row["price"] == 100.0
+    assert row["raw_price"] is None
+    assert row["sizing_price_buffer"] is None
     assert row["stop"] == 100.0
     assert row["atr"] == 5.0
     assert row["price_source"] == "alpaca"
@@ -185,38 +192,231 @@ def test_rank_candidates_enriches_symbol_only_rows_and_records_sources():
     assert row["atr_timestamp"] == "2026-05-06T00:00:00Z"
 
 
-def test_rank_candidates_preserves_manual_stop_during_enrichment():
+def test_rank_candidates_interprets_enriched_value_rows_by_strategy():
     provider = FakeMarketDataProvider(
         {
-            "TEST": SimpleNamespace(
-                price=100.0,
-                today_low=98.0,
-                atr_percent=4.5,
-                price_timestamp="price-time",
-                low_timestamp="low-time",
-                atr_timestamp="atr-time",
+            symbol: SimpleNamespace(
+                price=30.0,
+                today_low=20.0,
+                atr_percent=5.5,
+                price_timestamp=f"{symbol}-price-time",
+                low_timestamp=f"{symbol}-low-time",
+                atr_timestamp=f"{symbol}-atr-time",
             )
+            for symbol in ["EPONE", "EPATR", "FIVE", "BOONE", "BOATR"]
         }
     )
 
     result = rank_candidates(
         """
         EP
-        TEST 99.25
+        EPONE 27.83
+        EPATR 27.83 4.54
+
+        5% BO
+        FIVE 27.83 4.54
+
+        BO
+        BOONE 27.83
+        BOATR 27.83 4.54
         """,
         config=AppConfig(sizing_portfolio_amount=19_250, risk_percent=0.25, market_regime="SELECTIVE GO"),
-        strategy_metrics=pd.DataFrame([{"strategy": "EP", "mode": "Working"}]),
+        strategy_metrics=pd.DataFrame(
+            [
+                {"strategy": "EP", "mode": "Working"},
+                {"strategy": "5% BO", "mode": "Working"},
+                {"strategy": "BO", "mode": "Working"},
+            ]
+        ),
         today=date(2026, 5, 7),
         enrich=True,
+        feed="delayed_sip",
+        market_data_provider=provider,
+    )
+
+    rows = {row["symbol"]: row for row in result.rows}
+
+    assert rows["EPONE"]["price"] == 30.0
+    assert rows["EPONE"]["stop"] == 27.93
+    assert rows["EPONE"]["atr"] == 5.5
+    assert rows["EPONE"]["stop_source"] == "manual_low_buffer"
+    assert rows["EPONE"]["atr_source"] == "alpaca_marketsurge_21d"
+    assert rows["EPONE"]["stop_timestamp"] == ""
+
+    assert rows["EPATR"]["price"] == 30.0
+    assert rows["EPATR"]["stop"] == 27.93
+    assert rows["EPATR"]["atr"] == 4.54
+    assert rows["EPATR"]["stop_source"] == "manual_low_buffer"
+    assert rows["EPATR"]["atr_source"] == "manual"
+
+    assert rows["FIVE"]["price"] == 30.0
+    assert rows["FIVE"]["stop"] == 27.93
+    assert rows["FIVE"]["atr"] == 4.54
+    assert rows["FIVE"]["stop_source"] == "manual_low_buffer"
+    assert rows["FIVE"]["atr_source"] == "manual"
+
+    assert rows["BOONE"]["price"] == 30.0
+    assert rows["BOONE"]["stop"] == 27.83
+    assert rows["BOONE"]["atr"] == 5.5
+    assert rows["BOONE"]["stop_source"] == "manual"
+    assert rows["BOONE"]["atr_source"] == "alpaca_marketsurge_21d"
+    assert rows["BOONE"]["stop_timestamp"] == ""
+
+    assert rows["BOATR"]["price"] == 30.0
+    assert rows["BOATR"]["stop"] == 27.83
+    assert rows["BOATR"]["atr"] == 4.54
+    assert rows["BOATR"]["stop_source"] == "manual"
+    assert rows["BOATR"]["atr_source"] == "manual"
+
+
+def test_rank_candidates_applies_iex_sizing_cushion_to_alpaca_price_after_bo_manual_stop():
+    provider = FakeMarketDataProvider(
+        {
+            "TEST": SimpleNamespace(
+                price=31.43,
+                today_low=29.50,
+                atr_percent=5.7,
+                price_timestamp="2026-05-07T15:59:00Z",
+                low_timestamp="2026-05-07T00:00:00Z",
+                atr_timestamp="2026-05-06T00:00:00Z",
+            )
+        }
+    )
+
+    result = rank_candidates(
+        """
+        BO
+        TEST 29.76 5.7
+        """,
+        config=AppConfig(sizing_portfolio_amount=19_250, risk_percent=0.25, market_regime="GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
+        today=date(2026, 5, 7),
+        enrich=True,
+        feed="iex",
         market_data_provider=provider,
     )
 
     row = result.rows[0]
-    assert row["price"] == 100.0
-    assert row["stop"] == 99.25
-    assert row["atr"] == 4.5
+    assert row["price"] == 31.51
+    assert row["raw_price"] == 31.43
+    assert row["sizing_price_buffer"] == 0.08
+    assert row["stop"] == 29.76
     assert row["stop_source"] == "manual"
-    assert row["stop_timestamp"] == ""
+    assert row["shares"] == 110
+    assert row["position_size"] == 3466.10
+
+
+def test_rank_candidates_keeps_strategy_lod_stop_parsing_before_iex_sizing_cushion():
+    provider = FakeMarketDataProvider(
+        {
+            "EPTEST": SimpleNamespace(
+                price=31.43,
+                today_low=29.50,
+                atr_percent=5.7,
+                price_timestamp="EPTEST-price-time",
+                low_timestamp="EPTEST-low-time",
+                atr_timestamp="EPTEST-atr-time",
+            ),
+            "FIVETEST": SimpleNamespace(
+                price=31.43,
+                today_low=29.50,
+                atr_percent=5.7,
+                price_timestamp="FIVETEST-price-time",
+                low_timestamp="FIVETEST-low-time",
+                atr_timestamp="FIVETEST-atr-time",
+            ),
+        }
+    )
+
+    result = rank_candidates(
+        """
+        EP
+        EPTEST 29.76 5.7
+
+        5% BO
+        FIVETEST 29.76 5.7
+        """,
+        config=AppConfig(sizing_portfolio_amount=4_620, risk_percent=0.25, market_regime="SELECTIVE GO"),
+        strategy_metrics=pd.DataFrame(
+            [
+                {"strategy": "EP", "mode": "Working"},
+                {"strategy": "5% BO", "mode": "Working"},
+            ]
+        ),
+        today=date(2026, 5, 7),
+        enrich=True,
+        feed="iex",
+        market_data_provider=provider,
+    )
+
+    rows = {row["symbol"]: row for row in result.rows}
+
+    assert rows["EPTEST"]["price"] == 31.51
+    assert rows["EPTEST"]["raw_price"] == 31.43
+    assert rows["EPTEST"]["sizing_price_buffer"] == 0.08
+    assert rows["EPTEST"]["stop"] == 29.86
+    assert rows["EPTEST"]["stop_source"] == "manual_low_buffer"
+
+    assert rows["FIVETEST"]["price"] == 31.51
+    assert rows["FIVETEST"]["raw_price"] == 31.43
+    assert rows["FIVETEST"]["sizing_price_buffer"] == 0.08
+    assert rows["FIVETEST"]["stop"] == 29.86
+    assert rows["FIVETEST"]["stop_source"] == "manual_low_buffer"
+
+
+def test_rank_candidates_does_not_apply_sizing_cushion_to_sip_feeds_or_manual_price_rows():
+    provider = FakeMarketDataProvider(
+        {
+            "SIPTEST": SimpleNamespace(
+                price=31.43,
+                today_low=29.50,
+                atr_percent=5.7,
+                price_timestamp="SIPTEST-price-time",
+                low_timestamp="SIPTEST-low-time",
+                atr_timestamp="SIPTEST-atr-time",
+            )
+        }
+    )
+
+    sip_result = rank_candidates(
+        """
+        BO
+        SIPTEST 29.76 5.7
+        """,
+        config=AppConfig(sizing_portfolio_amount=4_620, risk_percent=0.25, market_regime="SELECTIVE GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
+        today=date(2026, 5, 7),
+        enrich=True,
+        feed="sip",
+        market_data_provider=provider,
+    )
+
+    sip_row = sip_result.rows[0]
+    assert sip_row["price"] == 31.43
+    assert sip_row["raw_price"] is None
+    assert sip_row["sizing_price_buffer"] is None
+    assert sip_row["shares"] == 13
+
+    manual_provider = FakeMarketDataProvider({})
+    manual_result = rank_candidates(
+        """
+        BO
+        MANUAL 31.43 29.76 5.7
+        """,
+        config=AppConfig(sizing_portfolio_amount=4_620, risk_percent=0.25, market_regime="SELECTIVE GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
+        today=date(2026, 5, 7),
+        enrich=True,
+        feed="iex",
+        market_data_provider=manual_provider,
+    )
+
+    manual_row = manual_result.rows[0]
+    assert manual_provider.calls == []
+    assert manual_row["price"] == 31.43
+    assert manual_row["raw_price"] is None
+    assert manual_row["sizing_price_buffer"] is None
+    assert manual_row["shares"] == 13
 
 
 def test_rank_candidates_reports_row_level_enrichment_failures_and_continues():
@@ -290,6 +490,8 @@ def test_table_csv_and_json_render_same_ranked_rows():
     ]
     assert csv_header[14:] == [
         "price_source",
+        "raw_price",
+        "sizing_price_buffer",
         "stop_source",
         "atr_source",
         "market_data_feed",
