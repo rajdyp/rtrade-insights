@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -85,6 +86,7 @@ OPEN_LOT_COLUMNS = [
 UNMATCHED_SELL_COLUMNS = ["symbol", "sell_date", "quantity", "sell_price"]
 IMPORT_ISSUE_COLUMNS = ["row_number", "issue", "raw_row"]
 STRATEGY_MODE_WINDOW = 15
+STRATEGY_MODE_ADJUSTMENT_K = 0.5
 STRATEGY_MODE_WORKING_THRESHOLD = 0.30
 STRATEGY_MODE_FAILING_THRESHOLD = -0.10
 ATTRIBUTION_TREND_THRESHOLD = 0.25
@@ -103,6 +105,7 @@ STRATEGY_METRIC_COLUMNS = [
     "average_win_hold",
     "average_loss_hold",
     "rolling_mode_exp",
+    "mode_adjusted_score",
     "mode",
     "action",
 ]
@@ -202,10 +205,17 @@ def calculate_total_realized_pnl(closed_trades: pd.DataFrame) -> float:
 
 
 def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
-    rolling_exp = _calculate_rolling_mode_exp(closed_trades)
-    if rolling_exp is None:
-        return {"rolling_mode_exp": "N/A", "mode": "Unknown", "action": "Tiny size only"}
+    rolling_scores = _calculate_rolling_mode_scores(closed_trades)
+    if rolling_scores is None:
+        return {
+            "rolling_mode_exp": "N/A",
+            "mode_adjusted_score": "N/A",
+            "mode": "Unknown",
+            "action": "Tiny size only",
+        }
+    rolling_exp, adjusted_score = rolling_scores
     rolling_exp = round(rolling_exp, 2)
+    adjusted_score = round(adjusted_score, 2)
 
     if rolling_exp > STRATEGY_MODE_WORKING_THRESHOLD:
         mode = "Working"
@@ -220,7 +230,12 @@ def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
         mode = "Failing"
         action = "Probe only / pause"
 
-    return {"rolling_mode_exp": f"{rolling_exp:+.2f}R", "mode": mode, "action": action}
+    return {
+        "rolling_mode_exp": f"{rolling_exp:+.2f}R",
+        "mode_adjusted_score": f"{adjusted_score:+.2f}R",
+        "mode": mode,
+        "action": action,
+    }
 
 
 def calculate_rolling_10r_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
@@ -261,6 +276,7 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
                 "average_win_hold": metrics["average_win_hold"],
                 "average_loss_hold": metrics["average_loss_hold"],
                 "rolling_mode_exp": rolling_mode["rolling_mode_exp"],
+                "mode_adjusted_score": rolling_mode["mode_adjusted_score"],
                 "mode": rolling_mode["mode"],
                 "action": rolling_mode["action"],
             }
@@ -343,9 +359,12 @@ def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> di
 
 def _mode_basis(rolling_mode: dict[str, str]) -> str:
     rolling_exp = rolling_mode.get("rolling_mode_exp")
+    adjusted_score = rolling_mode.get("mode_adjusted_score")
     if rolling_exp == "N/A" or not rolling_exp:
         return f"Need {STRATEGY_MODE_WINDOW} valid R trades"
-    return f"{STRATEGY_MODE_WINDOW}R Exp {rolling_exp}"
+    if adjusted_score == "N/A" or not adjusted_score:
+        return f"{STRATEGY_MODE_WINDOW}R {rolling_exp}"
+    return f"{STRATEGY_MODE_WINDOW}R {rolling_exp} | Adj {adjusted_score}"
 
 
 def _metric_delta_from_optional_prior(
@@ -541,6 +560,13 @@ def _delta_at_or_below(delta: float | None, threshold: float) -> bool:
 
 
 def _calculate_rolling_mode_exp(closed_trades: pd.DataFrame) -> float | None:
+    scores = _calculate_rolling_mode_scores(closed_trades)
+    if scores is None:
+        return None
+    return scores[0]
+
+
+def _calculate_rolling_mode_scores(closed_trades: pd.DataFrame) -> tuple[float, float] | None:
     if len(closed_trades) < STRATEGY_MODE_WINDOW:
         return None
 
@@ -557,7 +583,11 @@ def _calculate_rolling_mode_exp(closed_trades: pd.DataFrame) -> float | None:
     if len(valid_r_multiples) != STRATEGY_MODE_WINDOW:
         return None
 
-    return float(valid_r_multiples.sum()) / STRATEGY_MODE_WINDOW
+    rolling_exp = float(valid_r_multiples.mean())
+    adjusted_score = rolling_exp - (
+        STRATEGY_MODE_ADJUSTMENT_K * float(valid_r_multiples.std()) / math.sqrt(STRATEGY_MODE_WINDOW)
+    )
+    return rolling_exp, adjusted_score
 
 
 def parse_robinhood_csv(source: str | Path | TextIO | Any) -> ImportResult:
