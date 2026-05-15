@@ -735,7 +735,7 @@ def render_feedback(message: str, status: str) -> None:
 def render_mode_legend() -> None:
     render_feedback(
         "Mode uses latest 15 valid R trades: > +0.30R Working | 0 to +0.30R Caution | "
-        "-0.10R to 0 Weak | < -0.10R Failing",
+        "-0.10R to 0 Weak | < -0.10R Failing. Adj Score is a variance-adjusted reference.",
         "idle",
     )
 
@@ -795,6 +795,7 @@ def strategy_metrics_column_config() -> dict:
         "average_win_hold": st.column_config.NumberColumn("Win Hold", format="%.1f", width=78),
         "average_loss_hold": st.column_config.NumberColumn("Loss Hold", format="%.1f", width=82),
         "rolling_mode_exp": st.column_config.TextColumn("15R Exp", width=82),
+        "mode_adjusted_score": st.column_config.TextColumn("Adj Score", width=86),
         "mode": st.column_config.TextColumn("Mode", width=82),
         "action": st.column_config.TextColumn("Action", width=122),
     }

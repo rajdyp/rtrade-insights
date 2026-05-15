@@ -674,9 +674,29 @@ def test_calculate_strategy_metrics_adds_rolling_mode_and_action_from_r_multiple
 
     result = calculate_strategy_metrics(closed_trades)
 
-    assert result[["rolling_mode_exp", "mode", "action"]].to_dict("records") == [
-        {"rolling_mode_exp": "+0.35R", "mode": "Working", "action": "Normal size"}
+    columns = list(result.columns)
+    assert columns.index("mode_adjusted_score") == columns.index("rolling_mode_exp") + 1
+    assert result[["rolling_mode_exp", "mode_adjusted_score", "mode", "action"]].to_dict("records") == [
+        {
+            "rolling_mode_exp": "+0.35R",
+            "mode_adjusted_score": "+0.35R",
+            "mode": "Working",
+            "action": "Normal size",
+        }
     ]
+
+
+def test_calculate_strategy_metrics_keeps_adjusted_score_as_reference_only():
+    noisy_positive_window = [1.0] * 8 + [-0.4] * 7
+    closed_trades = pd.DataFrame(_closed_trade_window(noisy_positive_window))
+
+    result = calculate_strategy_metrics(closed_trades)
+
+    row = result.iloc[0]
+    assert row["rolling_mode_exp"] == "+0.35R"
+    assert row["mode_adjusted_score"] == "+0.25R"
+    assert row["mode"] == "Working"
+    assert row["action"] == "Normal size"
 
 
 def test_calculate_strategy_metrics_uses_latest_15_closed_trades_by_sell_date():
@@ -690,6 +710,7 @@ def test_calculate_strategy_metrics_uses_latest_15_closed_trades_by_sell_date():
     result = calculate_strategy_metrics(closed_trades)
 
     assert result.iloc[0]["rolling_mode_exp"] == "-0.10R"
+    assert result.iloc[0]["mode_adjusted_score"] == "-0.10R"
     assert result.iloc[0]["mode"] == "Weak"
     assert result.iloc[0]["action"] == "Quarter size"
 
@@ -702,6 +723,7 @@ def test_calculate_strategy_metrics_requires_15_closed_trades_for_rolling_mode()
     result = calculate_strategy_metrics(closed_trades)
 
     assert result.iloc[0]["rolling_mode_exp"] == "N/A"
+    assert result.iloc[0]["mode_adjusted_score"] == "N/A"
     assert result.iloc[0]["mode"] == "Unknown"
     assert result.iloc[0]["action"] == "Tiny size only"
 
@@ -714,6 +736,7 @@ def test_calculate_strategy_metrics_requires_latest_15_trades_to_have_valid_r_ri
     result = calculate_strategy_metrics(closed_trades)
 
     assert result.iloc[0]["rolling_mode_exp"] == "N/A"
+    assert result.iloc[0]["mode_adjusted_score"] == "N/A"
     assert result.iloc[0]["mode"] == "Unknown"
     assert result.iloc[0]["action"] == "Tiny size only"
 
@@ -734,6 +757,7 @@ def test_calculate_strategy_metrics_maps_rolling_mode_thresholds():
         result = calculate_strategy_metrics(closed_trades)
 
         assert result.iloc[0]["rolling_mode_exp"] == expected_exp
+        assert result.iloc[0]["mode_adjusted_score"] == expected_exp
         assert result.iloc[0]["mode"] == expected_mode
         assert result.iloc[0]["action"] == expected_action
 
@@ -744,9 +768,21 @@ def test_calculate_strategy_metrics_calculates_rolling_mode_per_strategy():
 
     result = calculate_strategy_metrics(pd.DataFrame([*bo_trades, *ep_trades]))
 
-    assert result[["strategy", "rolling_mode_exp", "mode", "action"]].to_dict("records") == [
-        {"strategy": "EP", "rolling_mode_exp": "+0.40R", "mode": "Working", "action": "Normal size"},
-        {"strategy": "BO", "rolling_mode_exp": "-0.30R", "mode": "Failing", "action": "Probe only / pause"},
+    assert result[["strategy", "rolling_mode_exp", "mode_adjusted_score", "mode", "action"]].to_dict("records") == [
+        {
+            "strategy": "EP",
+            "rolling_mode_exp": "+0.40R",
+            "mode_adjusted_score": "+0.40R",
+            "mode": "Working",
+            "action": "Normal size",
+        },
+        {
+            "strategy": "BO",
+            "rolling_mode_exp": "-0.30R",
+            "mode_adjusted_score": "-0.30R",
+            "mode": "Failing",
+            "action": "Probe only / pause",
+        },
     ]
 
 
@@ -757,9 +793,21 @@ def test_calculate_strategy_attribution_uses_same_mode_as_strategy_metrics():
     attribution = calculate_strategy_attribution(pd.DataFrame(trades))
 
     assert attribution.iloc[0]["mode"] == strategy_metrics.iloc[0]["mode"] == "Failing"
-    assert attribution.iloc[0]["mode_basis"] == "15R Exp -0.11R"
+    assert attribution.iloc[0]["mode_basis"] == "15R -0.11R | Adj -0.11R"
     assert attribution.iloc[0]["trend"] == "Need 30 trades"
     assert "interpretation" not in attribution.columns
+
+
+def test_calculate_strategy_attribution_mode_basis_shows_reference_adjusted_score():
+    trades = _closed_trade_window([1.0] * 8 + [-0.4] * 7)
+
+    strategy_metrics = calculate_strategy_metrics(pd.DataFrame(trades))
+    attribution = calculate_strategy_attribution(pd.DataFrame(trades))
+
+    row = attribution.iloc[0]
+    assert row["mode"] == strategy_metrics.iloc[0]["mode"] == "Working"
+    assert row["mode_basis"] == "15R +0.35R | Adj +0.25R"
+    assert row["trend"] == "Need 30 trades"
 
 
 def test_calculate_strategy_attribution_uses_latest_15_against_prior_15_disjoint_window():
@@ -771,7 +819,7 @@ def test_calculate_strategy_attribution_uses_latest_15_against_prior_15_disjoint
 
     row = result.iloc[0]
     assert row["mode"] == "Working"
-    assert row["mode_basis"] == "15R Exp +0.60R"
+    assert row["mode_basis"] == "15R +0.60R | Adj +0.60R"
     assert row["trend"] == "Improving (+0.40R)"
     assert row["trend_driver"] == "Winner size"
     assert "Exp R 0.60 vs 0.20" in row["evidence"]
@@ -865,7 +913,7 @@ def test_calculate_strategy_attribution_detects_recovering_trend():
 
     row = result.iloc[0]
     assert row["mode"] == "Weak"
-    assert row["mode_basis"] == "15R Exp -0.01R"
+    assert row["mode_basis"] == "15R -0.01R | Adj -0.01R"
     assert row["trend"] == "Recovering (+0.43R)"
     assert row["trend_driver"] == "Loss control"
     assert "Exp R -0.01 vs -0.44" in row["evidence"]
