@@ -734,8 +734,7 @@ def render_feedback(message: str, status: str) -> None:
 
 def render_mode_legend() -> None:
     render_feedback(
-        "Mode uses latest 15 valid R trades within the latest 20 closed trades: "
-        "> +0.30R Working | 0 to +0.30R Caution | "
+        "Mode uses latest 15 valid R trades: > +0.30R Working | 0 to +0.30R Caution | "
         "-0.10R to 0 Weak | < -0.10R Failing. Adj Score is a variance-adjusted reference.",
         "idle",
     )
