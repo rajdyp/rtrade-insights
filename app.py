@@ -734,7 +734,8 @@ def render_feedback(message: str, status: str) -> None:
 
 def render_mode_legend() -> None:
     render_feedback(
-        "Mode uses latest 15 valid R trades: > +0.30R Working | 0 to +0.30R Caution | "
+        "Mode uses latest 15 valid R trades within the latest 20 closed trades: "
+        "> +0.30R Working | 0 to +0.30R Caution | "
         "-0.10R to 0 Weak | < -0.10R Failing. Adj Score is a variance-adjusted reference.",
         "idle",
     )
@@ -758,10 +759,38 @@ def format_optional_number(value) -> str:
     return f"{float(value):.2f}"
 
 
+def format_profit_factor(metrics: dict | None) -> str:
+    if not metrics:
+        return "N/A"
+    value = metrics.get("profit_factor")
+    if value is not None and not pd.isna(value):
+        return f"{float(value):.2f}"
+    if metrics.get("win_count", 0) > 0 and metrics.get("loss_count", 0) == 0:
+        return "∞"
+    return "N/A"
+
+
 def format_blank_optional_number(value) -> str:
     if value is None or pd.isna(value):
         return ""
     return f"{float(value):.2f}"
+
+
+def strategy_metrics_display_frame(strategy_metrics: pd.DataFrame) -> pd.DataFrame:
+    display = strategy_metrics.copy()
+    if "profit_factor" not in display:
+        return display
+
+    def format_row(row: pd.Series) -> str:
+        value = row.get("profit_factor")
+        if value is not None and not pd.isna(value):
+            return f"{float(value):.2f}"
+        if row.get("average_win") is not None and not pd.isna(row.get("average_win")):
+            return "∞"
+        return "N/A"
+
+    display["profit_factor"] = display.apply(format_row, axis=1)
+    return display
 
 
 def format_optional_days(value) -> str:
@@ -786,7 +815,7 @@ def strategy_metrics_column_config() -> dict:
         "total_realized_pnl": st.column_config.NumberColumn("P/L", format="$%.2f", width=88),
         "win_rate": st.column_config.NumberColumn("Win %", format="%.1f%%", width=72),
         "expectancy": st.column_config.NumberColumn("Exp $", format="$%.2f", width=84),
-        "profit_factor": st.column_config.NumberColumn("PF", format="%.2f", width=62),
+        "profit_factor": st.column_config.TextColumn("PF", width=62),
         "average_win": st.column_config.NumberColumn("Avg Win", format="$%.2f", width=84),
         "average_loss": st.column_config.NumberColumn("Avg Loss", format="$%.2f", width=84),
         "average_win_r": st.column_config.NumberColumn("Avg R W", format="%.2f", width=76),
@@ -893,7 +922,7 @@ def render_trade_metrics(
         [
             ("Win Rate", format_optional_percent(metrics.get("win_rate"))),
             ("Expectancy", format_optional_currency(metrics.get("expectancy"))),
-            ("Profit Factor", format_optional_number(metrics.get("profit_factor"))),
+            ("Profit Factor", format_profit_factor(metrics)),
             ("Win/Loss Ratio", format_optional_number(metrics.get("win_loss_ratio"))),
         ],
         [
@@ -929,7 +958,7 @@ def render_trade_metrics(
         return
 
     st.dataframe(
-        strategy_metrics,
+        strategy_metrics_display_frame(strategy_metrics),
         column_config=strategy_metrics_column_config(),
         hide_index=True,
         width="stretch",
@@ -1229,17 +1258,23 @@ with st.expander("Robinhood Import", expanded=False):
 
     if robinhood_derivation.missing_planned_stops:
         render_feedback(
-            f"{robinhood_derivation.missing_planned_stops} matched lot rows do not have planned stops yet. "
-            f"Fill missing entry stops in {planned_stops_label()}.",
+            f"{robinhood_derivation.missing_planned_stops} matched lot rows do not have a usable planned stop. "
+            "Check missing or ambiguous planned stops in the Import Issues tab.",
             "idle",
         )
 
-    if imported_result is not None or not robinhood_derivation.unmatched_sells.empty:
+    if (
+        imported_result is not None
+        or not robinhood_derivation.unmatched_sells.empty
+        or not robinhood_derivation.planned_stop_issues.empty
+    ):
         issue_parts = []
         if imported_result is not None and not imported_result.malformed_rows.empty:
             issue_parts.append(f"{len(imported_result.malformed_rows)} malformed rows in the latest upload")
         if not robinhood_derivation.unmatched_sells.empty:
             issue_parts.append(f"{len(robinhood_derivation.unmatched_sells)} unmatched sells in stored transactions")
+        if not robinhood_derivation.planned_stop_issues.empty:
+            issue_parts.append(f"{len(robinhood_derivation.planned_stop_issues)} ambiguous planned stop keys")
         if issue_parts:
             render_feedback("Import issues found: " + ", ".join(issue_parts) + ".", "error")
 
@@ -1294,8 +1329,11 @@ with st.expander("Robinhood Import", expanded=False):
                 hide_index=True,
                 width="stretch",
             )
+        if not robinhood_derivation.planned_stop_issues.empty:
+            shown_any_issue = True
+            st.dataframe(robinhood_derivation.planned_stop_issues, hide_index=True, width="stretch")
         if not shown_any_issue:
-            render_feedback("No malformed rows or unmatched sells were found.", "idle")
+            render_feedback("No malformed rows, unmatched sells, or ambiguous planned stops were found.", "idle")
 
     with raw_tab:
         if st.session_state.robinhood_transactions.empty:

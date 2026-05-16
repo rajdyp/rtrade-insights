@@ -262,6 +262,15 @@ def test_derive_fifo_trades_treats_duplicate_planned_stop_keys_as_missing():
 
     assert pd.isna(result.closed_trades.iloc[0]["planned_stop"])
     assert result.missing_planned_stops == 1
+    assert result.planned_stop_issues.to_dict("records") == [
+        {
+            "symbol": "AEHR",
+            "buy_date": "2026-04-08",
+            "quantity": 4,
+            "issue": "Conflicting planned stops for this lot key.",
+            "detail": "planned_stop values: 55.25, 56.75",
+        }
+    ]
 
 
 def test_derive_fifo_trades_accepts_duplicate_planned_stop_keys_when_stop_matches():
@@ -284,6 +293,7 @@ def test_derive_fifo_trades_accepts_duplicate_planned_stop_keys_when_stop_matche
 
     assert result.closed_trades["planned_stop"].tolist() == [31.65, 31.65]
     assert result.missing_planned_stops == 0
+    assert result.planned_stop_issues.empty
 
 
 def test_derive_fifo_trades_treats_conflicting_strategy_keys_as_unclassified():
@@ -565,6 +575,31 @@ def test_calculate_trade_metrics_empty_closed_trades_are_safe():
     assert metrics["loss_streak"] == 0
 
 
+def test_calculate_trade_metrics_profit_factor_zero_loss_cases():
+    all_winners = pd.DataFrame(
+        [
+            {"sell_date": "2026-04-01", "realized_pnl": 10, "realized_pnl_percent": 10, "hold_days": 1},
+            {"sell_date": "2026-04-02", "realized_pnl": 20, "realized_pnl_percent": 20, "hold_days": 2},
+        ]
+    )
+    only_breakevens = pd.DataFrame(
+        [
+            {"sell_date": "2026-04-01", "realized_pnl": 0, "realized_pnl_percent": 0, "hold_days": 1},
+            {"sell_date": "2026-04-02", "realized_pnl": 0, "realized_pnl_percent": 0, "hold_days": 2},
+        ]
+    )
+    only_losses = pd.DataFrame(
+        [
+            {"sell_date": "2026-04-01", "realized_pnl": -10, "realized_pnl_percent": -10, "hold_days": 1},
+            {"sell_date": "2026-04-02", "realized_pnl": -20, "realized_pnl_percent": -20, "hold_days": 2},
+        ]
+    )
+
+    assert calculate_trade_metrics(all_winners)["profit_factor"] is None
+    assert calculate_trade_metrics(only_breakevens)["profit_factor"] is None
+    assert calculate_trade_metrics(only_losses)["profit_factor"] == 0.0
+
+
 def test_calculate_total_realized_pnl_sums_numeric_closed_trade_pnl():
     closed_trades = pd.DataFrame(
         [
@@ -728,17 +763,39 @@ def test_calculate_strategy_metrics_requires_15_closed_trades_for_rolling_mode()
     assert result.iloc[0]["action"] == "Tiny size only"
 
 
-def test_calculate_strategy_metrics_requires_latest_15_trades_to_have_valid_r_risk():
-    trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(1, 16)]
-    trades[-1]["planned_stop"] = 100
+def test_calculate_strategy_metrics_uses_latest_15_valid_r_trades_within_20_trade_lookback():
+    trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(1, 17)]
+    trades[-2]["planned_stop"] = 100
     closed_trades = pd.DataFrame(trades)
 
-    result = calculate_strategy_metrics(closed_trades)
+    metrics = calculate_strategy_metrics(closed_trades)
+    attribution = calculate_strategy_attribution(closed_trades)
 
-    assert result.iloc[0]["rolling_mode_exp"] == "N/A"
-    assert result.iloc[0]["mode_adjusted_score"] == "N/A"
-    assert result.iloc[0]["mode"] == "Unknown"
-    assert result.iloc[0]["action"] == "Tiny size only"
+    assert metrics.iloc[0]["rolling_mode_exp"] == "+0.50R"
+    assert metrics.iloc[0]["mode_adjusted_score"] == "+0.50R"
+    assert metrics.iloc[0]["mode"] == "Working"
+    assert metrics.iloc[0]["action"] == "Normal size"
+    assert attribution.iloc[0]["mode_basis"] == (
+        "15 valid R trades from latest 16 closed trades; skipped 1 missing/invalid stop | 15R +0.50R | Adj +0.50R"
+    )
+
+
+def test_calculate_strategy_metrics_stays_unknown_when_20_trade_lookback_has_too_few_valid_r_trades():
+    old_valid_trades = [_closed_trade(sell_date=f"2026-03-{day:02d}", r_multiple=2) for day in range(1, 6)]
+    recent_valid_trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(1, 15)]
+    recent_invalid_trades = [_closed_trade(sell_date=f"2026-04-{day:02d}", r_multiple=0.5) for day in range(15, 21)]
+    for trade in recent_invalid_trades:
+        trade["planned_stop"] = 100
+    closed_trades = pd.DataFrame([*old_valid_trades, *recent_valid_trades, *recent_invalid_trades])
+
+    metrics = calculate_strategy_metrics(closed_trades)
+    attribution = calculate_strategy_attribution(closed_trades)
+
+    assert metrics.iloc[0]["rolling_mode_exp"] == "N/A"
+    assert metrics.iloc[0]["mode_adjusted_score"] == "N/A"
+    assert metrics.iloc[0]["mode"] == "Unknown"
+    assert metrics.iloc[0]["action"] == "Tiny size only"
+    assert attribution.iloc[0]["mode_basis"] == "Need 15 valid R trades; found 14 in latest 20 closed trades"
 
 
 def test_calculate_strategy_metrics_maps_rolling_mode_thresholds():

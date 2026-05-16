@@ -149,6 +149,27 @@ def test_rank_candidates_uses_unknown_mode_when_strategy_metrics_are_missing():
     assert result.rows[0]["risk_percent"] == 0.06
 
 
+def test_rank_candidates_reports_gate_closed_for_zero_matrix_risk():
+    result = rank_candidates(
+        """
+        EP
+        TEST 100 95 5
+        """,
+        config=AppConfig(sizing_portfolio_amount=19_250, risk_percent=0.25, market_regime="NO-GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "EP", "mode": "Failing"}]),
+        today=date(2026, 5, 7),
+    )
+
+    expected_error = "Gate closed: NO-GO / Failing; no new sizing."
+    assert result.rows[0]["risk_percent"] == 0.0
+    assert result.rows[0]["validation_error"] == expected_error
+    assert expected_error in render_table(result)
+    assert expected_error in render_csv(result)
+
+    json_payload = json.loads(render_rank_result(result, "json"))
+    assert json_payload["groups"]["EP"][0]["validation_error"] == expected_error
+
+
 def test_rank_candidates_enriches_symbol_only_rows_and_records_sources():
     provider = FakeMarketDataProvider(
         {
