@@ -330,6 +330,27 @@ def test_sell_lot_rounds_down_to_one_third_of_shares():
         pd.DataFrame(
             [
                 {
+                    "symbol": "ONE",
+                    "share_price": 100,
+                    "stop_price": 90,
+                    "portfolio_amount": 100,
+                    "risk_percent": 10,
+                },
+                {
+                    "symbol": "TWO",
+                    "share_price": 100,
+                    "stop_price": 90,
+                    "portfolio_amount": 200,
+                    "risk_percent": 10,
+                },
+                {
+                    "symbol": "THREE",
+                    "share_price": 100,
+                    "stop_price": 90,
+                    "portfolio_amount": 300,
+                    "risk_percent": 10,
+                },
+                {
                     "symbol": "THIRTEEN",
                     "share_price": 228.50,
                     "stop_price": 221.00,
@@ -347,10 +368,16 @@ def test_sell_lot_rounds_down_to_one_third_of_shares():
         )
     )
 
-    assert result.iloc[0]["number_of_shares"] == 13
-    assert result.iloc[0]["sell_lot"] == 4
-    assert result.iloc[1]["number_of_shares"] == 16
-    assert result.iloc[1]["sell_lot"] == 5
+    assert result.iloc[0]["number_of_shares"] == 1
+    assert result.iloc[0]["sell_lot"] == 1
+    assert result.iloc[1]["number_of_shares"] == 2
+    assert result.iloc[1]["sell_lot"] == 1
+    assert result.iloc[2]["number_of_shares"] == 3
+    assert result.iloc[2]["sell_lot"] == 1
+    assert result.iloc[3]["number_of_shares"] == 13
+    assert result.iloc[3]["sell_lot"] == 4
+    assert result.iloc[4]["number_of_shares"] == 16
+    assert result.iloc[4]["sell_lot"] == 5
 
 
 def test_invalid_position_has_blank_sell_lot():

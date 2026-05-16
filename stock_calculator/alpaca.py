@@ -208,7 +208,8 @@ def _atr_percent(bars: list[dict[str, Any]], today: date) -> tuple[float | None,
             previous_close = close
             continue
         if previous_close is not None:
-            daily_ranges.append(((high - low) / previous_close) * 100)
+            effective_range = max(high, previous_close) - min(low, previous_close)
+            daily_ranges.append((effective_range / previous_close) * 100)
         previous_close = close
 
     if len(daily_ranges) < 21:

@@ -85,7 +85,9 @@ OPEN_LOT_COLUMNS = [
 
 UNMATCHED_SELL_COLUMNS = ["symbol", "sell_date", "quantity", "sell_price"]
 IMPORT_ISSUE_COLUMNS = ["row_number", "issue", "raw_row"]
+PLANNED_STOP_ISSUE_COLUMNS = ["symbol", "buy_date", "quantity", "issue", "detail"]
 STRATEGY_MODE_WINDOW = 15
+STRATEGY_MODE_LOOKBACK = 20
 STRATEGY_MODE_ADJUSTMENT_K = 0.5
 STRATEGY_MODE_WORKING_THRESHOLD = 0.30
 STRATEGY_MODE_FAILING_THRESHOLD = -0.10
@@ -134,6 +136,17 @@ class TradeDerivation:
     open_lots: pd.DataFrame
     unmatched_sells: pd.DataFrame
     missing_planned_stops: int
+    planned_stop_issues: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class RollingModeScores:
+    rolling_exp: float | None
+    adjusted_score: float | None
+    valid_count: int
+    examined_count: int
+    skipped_count: int
+    lookback_count: int
 
 
 def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | int | None]:
@@ -206,14 +219,18 @@ def calculate_total_realized_pnl(closed_trades: pd.DataFrame) -> float:
 
 def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
     rolling_scores = _calculate_rolling_mode_scores(closed_trades)
-    if rolling_scores is None:
+    if rolling_scores is None or rolling_scores.rolling_exp is None or rolling_scores.adjusted_score is None:
+        found = rolling_scores.valid_count if rolling_scores is not None else 0
+        lookback = rolling_scores.lookback_count if rolling_scores is not None else min(len(closed_trades), STRATEGY_MODE_LOOKBACK)
         return {
             "rolling_mode_exp": "N/A",
             "mode_adjusted_score": "N/A",
             "mode": "Unknown",
             "action": "Tiny size only",
+            "mode_basis": f"Need {STRATEGY_MODE_WINDOW} valid R trades; found {found} in latest {lookback} closed trades",
         }
-    rolling_exp, adjusted_score = rolling_scores
+    rolling_exp = rolling_scores.rolling_exp
+    adjusted_score = rolling_scores.adjusted_score
     rolling_exp = round(rolling_exp, 2)
     adjusted_score = round(adjusted_score, 2)
 
@@ -230,11 +247,20 @@ def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
         mode = "Failing"
         action = "Probe only / pause"
 
+    mode_basis = f"{STRATEGY_MODE_WINDOW}R {rolling_exp:+.2f}R | Adj {adjusted_score:+.2f}R"
+    if rolling_scores.skipped_count:
+        plural = "" if rolling_scores.skipped_count == 1 else "s"
+        mode_basis = (
+            f"{STRATEGY_MODE_WINDOW} valid R trades from latest {rolling_scores.examined_count} closed trades; "
+            f"skipped {rolling_scores.skipped_count} missing/invalid stop{plural} | {mode_basis}"
+        )
+
     return {
         "rolling_mode_exp": f"{rolling_exp:+.2f}R",
         "mode_adjusted_score": f"{adjusted_score:+.2f}R",
         "mode": mode,
         "action": action,
+        "mode_basis": mode_basis,
     }
 
 
@@ -358,6 +384,9 @@ def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> di
 
 
 def _mode_basis(rolling_mode: dict[str, str]) -> str:
+    mode_basis = rolling_mode.get("mode_basis")
+    if mode_basis:
+        return mode_basis
     rolling_exp = rolling_mode.get("rolling_mode_exp")
     adjusted_score = rolling_mode.get("mode_adjusted_score")
     if rolling_exp == "N/A" or not rolling_exp:
@@ -563,31 +592,61 @@ def _calculate_rolling_mode_exp(closed_trades: pd.DataFrame) -> float | None:
     scores = _calculate_rolling_mode_scores(closed_trades)
     if scores is None:
         return None
-    return scores[0]
+    return scores.rolling_exp
 
 
-def _calculate_rolling_mode_scores(closed_trades: pd.DataFrame) -> tuple[float, float] | None:
-    if len(closed_trades) < STRATEGY_MODE_WINDOW:
+def _calculate_rolling_mode_scores(closed_trades: pd.DataFrame) -> RollingModeScores | None:
+    if len(closed_trades) == 0:
         return None
 
     trades = closed_trades.copy()
     trades["sell_date"] = pd.to_datetime(trades.get("sell_date"), errors="coerce")
-    trades = trades.sort_values("sell_date", kind="mergesort").tail(STRATEGY_MODE_WINDOW).copy()
+    trades = trades.sort_values("sell_date", kind="mergesort").tail(STRATEGY_MODE_LOOKBACK).reset_index(drop=True)
 
     for column in ["realized_pnl", "buy_price", "planned_stop", "quantity"]:
         trades[column] = pd.to_numeric(trades.get(column), errors="coerce")
 
     trades["initial_risk"] = (trades["buy_price"] - trades["planned_stop"]) * trades["quantity"]
     trades["r_multiple"] = trades["realized_pnl"] / trades["initial_risk"]
-    valid_r_multiples = trades.loc[trades["initial_risk"] > 0, "r_multiple"].dropna()
-    if len(valid_r_multiples) != STRATEGY_MODE_WINDOW:
-        return None
+    valid_mask = (trades["initial_risk"] > 0) & trades["r_multiple"].notna()
+
+    selected_indices: list[Any] = []
+    examined_count = 0
+    skipped_count = 0
+    for index, is_valid in reversed(list(valid_mask.items())):
+        examined_count += 1
+        if is_valid:
+            selected_indices.append(index)
+            if len(selected_indices) == STRATEGY_MODE_WINDOW:
+                break
+        else:
+            skipped_count += 1
+
+    if len(selected_indices) != STRATEGY_MODE_WINDOW:
+        valid_count = int(valid_mask.sum())
+        return RollingModeScores(
+            rolling_exp=None,
+            adjusted_score=None,
+            valid_count=valid_count,
+            examined_count=len(trades),
+            skipped_count=len(trades) - valid_count,
+            lookback_count=len(trades),
+        )
+
+    valid_r_multiples = trades.loc[list(reversed(selected_indices)), "r_multiple"]
 
     rolling_exp = float(valid_r_multiples.mean())
     adjusted_score = rolling_exp - (
         STRATEGY_MODE_ADJUSTMENT_K * float(valid_r_multiples.std()) / math.sqrt(STRATEGY_MODE_WINDOW)
     )
-    return rolling_exp, adjusted_score
+    return RollingModeScores(
+        rolling_exp=rolling_exp,
+        adjusted_score=adjusted_score,
+        valid_count=len(valid_r_multiples),
+        examined_count=examined_count,
+        skipped_count=skipped_count,
+        lookback_count=len(trades),
+    )
 
 
 def parse_robinhood_csv(source: str | Path | TextIO | Any) -> ImportResult:
@@ -688,9 +747,10 @@ def derive_fifo_trades(
             _empty_open_lots(),
             _empty_unmatched_sells(),
             0,
+            _empty_planned_stop_issues(),
         )
 
-    planned_stop_lookup = _planned_stop_lookup(planned_stops)
+    planned_stop_lookup, planned_stop_issues = _planned_stop_lookup(planned_stops)
     normalized = _normalize_transactions(transactions)
     lots: defaultdict[str, deque[dict[str, Any]]] = defaultdict(deque)
     closed_trades: list[dict[str, Any]] = []
@@ -793,7 +853,14 @@ def derive_fifo_trades(
     unmatched_frame = pd.DataFrame(unmatched_sells, columns=UNMATCHED_SELL_COLUMNS)
     missing_planned_stops = _missing_stop_count(closed_frame) + _missing_stop_count(open_frame)
 
-    return TradeDerivation(closed_frame, exit_match_frame, open_frame, unmatched_frame, missing_planned_stops)
+    return TradeDerivation(
+        closed_frame,
+        exit_match_frame,
+        open_frame,
+        unmatched_frame,
+        missing_planned_stops,
+        planned_stop_issues,
+    )
 
 
 def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
@@ -891,9 +958,11 @@ def _display_optional_text(value: Any) -> str:
     return text if text and text.lower() not in {"none", "nan"} else "N/A"
 
 
-def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, str, float], dict[str, float | str | None]]:
+def _planned_stop_lookup(
+    planned_stops: pd.DataFrame | None,
+) -> tuple[dict[tuple[str, str, float], dict[str, float | str | None]], pd.DataFrame]:
     if planned_stops is None or planned_stops.empty:
-        return {}
+        return {}, _empty_planned_stop_issues()
 
     stops_by_key: defaultdict[tuple[str, str, float], set[float]] = defaultdict(set)
     strategies_by_key: defaultdict[tuple[str, str, float], set[str]] = defaultdict(set)
@@ -926,18 +995,31 @@ def _planned_stop_lookup(planned_stops: pd.DataFrame | None) -> dict[tuple[str, 
             regimes_by_key[key].add(market_regime)
 
     lookup = {}
+    issue_rows: list[dict[str, object]] = []
     for key in set(stops_by_key) | set(strategies_by_key) | set(atrs_by_key) | set(regimes_by_key):
         stops = stops_by_key[key]
         strategies = strategies_by_key[key]
         atrs = atrs_by_key[key]
         regimes = regimes_by_key[key]
+        if len(stops) > 1:
+            symbol, buy_date, quantity = key
+            stop_values = ", ".join(f"{stop:g}" for stop in sorted(stops))
+            issue_rows.append(
+                {
+                    "symbol": symbol,
+                    "buy_date": buy_date,
+                    "quantity": _clean_quantity(quantity),
+                    "issue": "Conflicting planned stops for this lot key.",
+                    "detail": f"planned_stop values: {stop_values}",
+                }
+            )
         lookup[key] = {
             "planned_stop": next(iter(stops)) if len(stops) == 1 else None,
             "strategy": next(iter(strategies)) if len(strategies) == 1 else "",
             "atr": next(iter(atrs)) if len(atrs) == 1 else None,
             "market_regime": next(iter(regimes)) if len(regimes) == 1 else "",
         }
-    return lookup
+    return lookup, pd.DataFrame(issue_rows, columns=PLANNED_STOP_ISSUE_COLUMNS)
 
 
 def _normalize_market_regime_or_blank(value: Any) -> str:
@@ -1068,6 +1150,10 @@ def _empty_open_lots() -> pd.DataFrame:
 
 def _empty_unmatched_sells() -> pd.DataFrame:
     return pd.DataFrame(columns=UNMATCHED_SELL_COLUMNS)
+
+
+def _empty_planned_stop_issues() -> pd.DataFrame:
+    return pd.DataFrame(columns=PLANNED_STOP_ISSUE_COLUMNS)
 
 
 def _empty_issues() -> pd.DataFrame:

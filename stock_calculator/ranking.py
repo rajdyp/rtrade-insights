@@ -47,6 +47,7 @@ METADATA_COLUMNS = [
 ]
 
 RANK_COLUMNS = [*TABLE_COLUMNS, *METADATA_COLUMNS]
+GATE_CLOSED_ERROR = "Gate closed: NO-GO / Failing; no new sizing."
 
 TABLE_HEADERS = {
     "strategy": "Strategy",
@@ -209,6 +210,7 @@ def rank_candidates(
     for candidate in candidates:
         mode = strategy_mode_for_selection(strategy_metrics, candidate.strategy)
         risk_percent = suggested_risk_percent(market_regime, mode, config.risk_percent)
+        validation_error_override = GATE_CLOSED_ERROR if risk_percent == 0 else None
         calculated = calculate_positions(
             pd.DataFrame(
                 [
@@ -225,7 +227,15 @@ def rank_candidates(
             ),
             as_of=today,
         ).iloc[0]
-        rows.append(_rank_row(candidate, calculated, mode, market_regime))
+        rows.append(
+            _rank_row(
+                candidate,
+                calculated,
+                mode,
+                market_regime,
+                validation_error_override=validation_error_override,
+            )
+        )
 
     return RankResult(
         groups=_group_rank_rows(rows),
@@ -411,6 +421,8 @@ def _rank_row(
     calculated: pd.Series,
     mode: str,
     market_regime: str,
+    *,
+    validation_error_override: str | None = None,
 ) -> dict[str, object]:
     return {
         "strategy": candidate.strategy,
@@ -426,7 +438,7 @@ def _rank_row(
         "position_size": _optional_float(calculated["position_size"]),
         "risk_percent": _optional_float(calculated["risk_percent"]),
         "total_risk": _optional_float(calculated["risk_amount"]),
-        "validation_error": str(calculated["validation_error"] or ""),
+        "validation_error": validation_error_override or str(calculated["validation_error"] or ""),
         "price_source": candidate.price_source,
         "raw_price": candidate.raw_price,
         "sizing_price_buffer": candidate.sizing_price_buffer,

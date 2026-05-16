@@ -55,6 +55,28 @@ def test_atr_percent_uses_marketsurge_style_daily_range_percent_not_true_range_o
     assert timestamp == "2026-04-22T00:00:00Z"
 
 
+def test_atr_percent_includes_gap_up_and_gap_down_range_from_previous_close():
+    bars = [{"h": 100.0, "l": 100.0, "c": 100.0, "t": "2026-04-01T00:00:00Z"}]
+    for index in range(21):
+        if index % 2 == 0:
+            high, low = 112.0, 108.0
+        else:
+            high, low = 95.0, 88.0
+        bars.append(
+            {
+                "h": high,
+                "l": low,
+                "c": 100.0,
+                "t": (date(2026, 4, 2) + timedelta(days=index)).isoformat() + "T00:00:00Z",
+            }
+        )
+
+    atr_percent, timestamp = _atr_percent(bars, date(2026, 5, 7))
+
+    assert atr_percent == 12.0
+    assert timestamp == "2026-04-22T00:00:00Z"
+
+
 class FakeSession:
     def __init__(self):
         self.calls = []

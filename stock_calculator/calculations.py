@@ -197,7 +197,7 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
         risk_amount=round(risk_amount, 2),
         number_of_shares=number_of_shares,
         hold_count=hold_count,
-        sell_lot=number_of_shares // 3,
+        sell_lot=max(1, number_of_shares // 3),
         position_size=round(position_size, 2),
         validation_error="",
     )
