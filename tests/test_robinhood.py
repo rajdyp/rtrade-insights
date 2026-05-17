@@ -12,6 +12,7 @@ from stock_calculator.robinhood import (
     derive_fifo_trades,
     display_trade_context_frame,
     parse_robinhood_csv,
+    portfolio_attribution_note,
 )
 
 
@@ -673,18 +674,21 @@ def _closed_trade(
     r_multiple=0.0,
     planned_stop=90,
     buy_price=100,
+    atr=None,
     market_regime="",
+    hold_days=1,
 ):
     return {
         "strategy": strategy,
         "sell_date": sell_date,
         "quantity": 1,
         "planned_stop": planned_stop,
+        "atr": atr,
         "market_regime": market_regime,
         "buy_price": buy_price,
         "realized_pnl": (buy_price - planned_stop) * r_multiple,
         "realized_pnl_percent": r_multiple * 10,
-        "hold_days": 1,
+        "hold_days": hold_days,
     }
 
 
@@ -699,6 +703,19 @@ def _closed_trade_window(r_multiples, *, strategy="EP", start="2026-04-01", regi
             market_regime=regime,
         )
         for date, r_multiple, regime in zip(dates, r_multiples, regimes, strict=True)
+    ]
+
+
+def _held_trade_window(r_multiples, hold_days, *, strategy="EP", start="2026-04-01"):
+    dates = pd.date_range(start=start, periods=len(r_multiples), freq="D")
+    return [
+        _closed_trade(
+            strategy=strategy,
+            sell_date=date.date().isoformat(),
+            r_multiple=r_multiple,
+            hold_days=hold_day,
+        )
+        for date, r_multiple, hold_day in zip(dates, r_multiples, hold_days, strict=True)
     ]
 
 
@@ -843,6 +860,23 @@ def test_calculate_strategy_metrics_calculates_rolling_mode_per_strategy():
     ]
 
 
+def test_calculate_trade_metrics_computes_hold_time_ratio_from_loss_and_win_holds():
+    trades = pd.DataFrame(
+        [
+            _closed_trade(r_multiple=1.0, hold_days=2),
+            _closed_trade(r_multiple=1.0, hold_days=4),
+            _closed_trade(r_multiple=-0.5, hold_days=6),
+            _closed_trade(r_multiple=-0.5, hold_days=12),
+        ]
+    )
+
+    metrics = calculate_trade_metrics(trades)
+
+    assert metrics["average_win_hold"] == 3.0
+    assert metrics["average_loss_hold"] == 9.0
+    assert metrics["hold_time_ratio"] == 3.0
+
+
 def test_calculate_strategy_attribution_uses_same_mode_as_strategy_metrics():
     trades = _closed_trade_window([-0.11] * 15)
 
@@ -878,8 +912,10 @@ def test_calculate_strategy_attribution_uses_latest_15_against_prior_15_disjoint
     assert row["mode"] == "Working"
     assert row["mode_basis"] == "15R +0.60R | Adj +0.60R"
     assert row["trend"] == "Improving (+0.40R)"
-    assert row["trend_driver"] == "Winner size"
+    assert row["trend_driver"] == "Winner size + Expectancy R"
     assert "Exp R 0.60 vs 0.20" in row["evidence"]
+    assert "Recent: 15 trades over 15 days" in row["evidence"]
+    assert "Prior: 15 trades over 15 days" in row["evidence"]
 
 
 def test_calculate_strategy_attribution_detects_weakening_strategy():
@@ -891,8 +927,12 @@ def test_calculate_strategy_attribution_detects_weakening_strategy():
     row = result.iloc[0]
     assert row["mode"] == "Working"
     assert row["trend"] == "Weakening (-0.50R)"
-    assert row["trend_driver"] == "Winner size"
+    assert row["trend_driver"] == "Winner size + Expectancy R"
     assert "Exp R 0.50 vs 1.00" in row["evidence"]
+    assert row["playbook"] == (
+        "Early warning: expectancy is declining (Winner size + Expectancy R). "
+        "Monitor closely and reduce size proactively if trend continues."
+    )
 
 
 def test_calculate_strategy_attribution_detects_failing_strategy():
@@ -904,7 +944,7 @@ def test_calculate_strategy_attribution_detects_failing_strategy():
     row = result.iloc[0]
     assert row["mode"] == "Failing"
     assert row["trend"] == "Weakening (-1.30R)"
-    assert row["trend_driver"] in {"Hit rate", "Expectancy R"}
+    assert row["trend_driver"] == "Hit rate + Loss streak + Expectancy R"
 
 
 def test_calculate_strategy_attribution_marks_flat_when_no_clear_driver():
@@ -916,7 +956,7 @@ def test_calculate_strategy_attribution_marks_flat_when_no_clear_driver():
     assert row["mode"] == "Caution"
     assert row["trend"] == "Flat (+0.00R)"
     assert row["trend_driver"] == "No clear driver"
-    assert row["playbook"] == "Keep using Market Regime and Strategy Mode sizing."
+    assert row["playbook"] == "Keep using Market Regime and Strategy Mode sizing while monitoring the listed drivers."
 
 
 def test_calculate_strategy_attribution_requires_15_trades_per_strategy():
@@ -924,13 +964,17 @@ def test_calculate_strategy_attribution_requires_15_trades_per_strategy():
 
     result = calculate_strategy_attribution(pd.DataFrame(trades))
 
-    assert result.iloc[0][["mode", "mode_basis", "trend", "trend_driver", "evidence"]].to_dict() == {
+    row = result.iloc[0]
+    assert row[["mode", "mode_basis", "trend", "trend_driver"]].to_dict() == {
         "mode": "Unknown",
         "mode_basis": "Need 15 valid R trades",
         "trend": "Need 15 trades",
         "trend_driver": "Need 15 trades",
-        "evidence": "14 closed trades",
     }
+    assert row["evidence"] == "14 closed trades | Exp R 0.40 | directional only until 15 valid R trades"
+    assert row["playbook"] == (
+        "Insufficient valid R-trade history; maintain minimum sizing until 15 valid R trades are available."
+    )
 
 
 def test_calculate_strategy_attribution_reports_regime_driver_when_enough_tagged_trades():
@@ -959,7 +1003,9 @@ def test_calculate_strategy_attribution_ignores_regime_driver_without_enough_reg
 
     result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
 
-    assert not result.iloc[0]["trend_driver"].startswith("Regime")
+    row = result.iloc[0]
+    assert not row["trend_driver"].startswith("Regime")
+    assert "Regime attribution: need at least 3 tagged trades in 2 regimes" in row["evidence"]
 
 
 def test_calculate_strategy_attribution_detects_recovering_trend():
@@ -972,5 +1018,194 @@ def test_calculate_strategy_attribution_detects_recovering_trend():
     assert row["mode"] == "Weak"
     assert row["mode_basis"] == "15R -0.01R | Adj -0.01R"
     assert row["trend"] == "Recovering (+0.43R)"
-    assert row["trend_driver"] == "Loss control"
+    assert row["trend_driver"] == "Loss control + Expectancy R"
     assert "Exp R -0.01 vs -0.44" in row["evidence"]
+    assert "Avg loss R -0.01 vs -0.44 (+0.43)" in row["evidence"]
+
+
+def test_calculate_strategy_attribution_reports_regime_warmup_when_tagged_trades_are_sparse():
+    prior_trades = _closed_trade_window([0.1] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window(
+        [0.1] * 15,
+        start="2026-03-01",
+        regimes=["GO", "NO-GO", *([""] * 13)],
+    )
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    assert "Regime attribution: need 4 more tagged trades" in result.iloc[0]["evidence"]
+
+
+def test_calculate_strategy_attribution_playbook_respects_no_go_regime_for_working_strategy():
+    trades = _closed_trade_window([0.6] * 30, start="2026-02-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame(trades), market_regime="NO-GO")
+
+    row = result.iloc[0]
+    assert row["mode"] == "Working"
+    assert row["playbook"] == (
+        "Strategy is working, but NO-GO regime limits sizing. Wait for GO conditions for full deployment."
+    )
+
+
+def test_calculate_strategy_attribution_playbook_reports_caution_recovery():
+    prior_trades = _closed_trade_window([-0.2] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window([0.1] * 15, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Caution"
+    assert row["trend"] == "Improving (+0.30R)"
+    assert row["playbook"] == "Trend is recovering. Watch for Working status before resuming normal sizing."
+
+
+def test_calculate_strategy_attribution_playbook_reports_caution_weakening():
+    prior_trades = _closed_trade_window([0.4] * 15, start="2026-02-01")
+    recent_trades = _closed_trade_window([0.1] * 15, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Caution"
+    assert row["trend"] == "Weakening (-0.30R)"
+    assert row["playbook"] == (
+        "Trend weakening from Caution. Reduce to Weak-level sizing proactively rather than waiting for mode to drop."
+    )
+
+
+def test_calculate_strategy_attribution_playbook_combines_multi_driver_advice():
+    prior_trades = _closed_trade_window([1.0] * 10 + [-0.2] * 5, start="2026-02-01")
+    recent_trades = _closed_trade_window([1.0] * 5 + [-0.6] * 10, start="2026-03-01")
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Weak"
+    assert "Loss control" in row["trend_driver"]
+    assert "Hit rate" in row["trend_driver"]
+    assert "Tighten stop discipline and avoid entries where risk can expand." in row["playbook"]
+    assert "Increase entry selectivity and reduce marginal setups." in row["playbook"]
+
+
+def test_calculate_strategy_attribution_flags_hold_time_when_losses_are_held_longer_and_worsening():
+    prior_trades = _held_trade_window(
+        [1.0] * 10 + [-0.2] * 5,
+        [4] * 15,
+        start="2026-02-01",
+    )
+    recent_trades = _held_trade_window(
+        [1.0] * 5 + [-0.6] * 10,
+        [1] * 5 + [3] * 10,
+        start="2026-03-01",
+    )
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert "Hold time" in row["trend_driver"]
+    assert "Hold ratio 3.00 vs 1.00 (+2.00)" in row["evidence"]
+    assert (
+        "Losses are being held significantly longer than wins. "
+        "Enforce time-based or rule-based exits on losing positions."
+    ) in row["playbook"]
+
+
+def test_calculate_strategy_attribution_ignores_hold_time_when_ratio_is_high_but_not_worsening():
+    prior_trades = _held_trade_window(
+        [1.0] * 10 + [-0.2] * 5,
+        [2] * 10 + [4] * 5,
+        start="2026-02-01",
+    )
+    recent_trades = _held_trade_window(
+        [1.0] * 5 + [-0.6] * 10,
+        [2] * 5 + [4] * 10,
+        start="2026-03-01",
+    )
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    assert "Hold time" not in result.iloc[0]["trend_driver"]
+
+
+def test_calculate_strategy_attribution_ignores_hold_time_when_ratio_worsens_but_stays_below_threshold():
+    prior_trades = _held_trade_window(
+        [1.0] * 10 + [-0.2] * 5,
+        [4] * 10 + [3] * 5,
+        start="2026-02-01",
+    )
+    recent_trades = _held_trade_window(
+        [1.0] * 5 + [-0.6] * 10,
+        [4] * 5 + [5] * 10,
+        start="2026-03-01",
+    )
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    row = result.iloc[0]
+    assert "Hold ratio 1.25 vs 0.75 (+0.50)" in row["evidence"]
+    assert "Hold time" not in row["trend_driver"]
+
+
+def test_calculate_strategy_attribution_labels_no_prior_positive_metrics_as_current_strengths():
+    trades = _closed_trade_window([0.6] * 15)
+
+    result = calculate_strategy_attribution(pd.DataFrame(trades))
+
+    row = result.iloc[0]
+    assert row["mode"] == "Working"
+    assert row["trend"] == "Need 30 trades"
+    assert row["trend_driver"].startswith("Current strengths:")
+
+
+def test_calculate_strategy_attribution_surfaces_risk_in_atr_shift():
+    prior_trades = [
+        _closed_trade(sell_date=date.date().isoformat(), r_multiple=0.2, atr=10)
+        for date in pd.date_range(start="2026-02-01", periods=15, freq="D")
+    ]
+    recent_trades = [
+        _closed_trade(sell_date=date.date().isoformat(), r_multiple=0.2, atr=20)
+        for date in pd.date_range(start="2026-03-01", periods=15, freq="D")
+    ]
+
+    result = calculate_strategy_attribution(pd.DataFrame([*prior_trades, *recent_trades]))
+
+    assert "Risk/ATR 0.50 vs 1.00 (-0.50)" in result.iloc[0]["evidence"]
+
+
+def test_portfolio_attribution_note_is_blank_with_one_deteriorating_strategy():
+    attribution = pd.DataFrame(
+        [
+            {"strategy": "EP", "mode": "Weak", "trend": "Flat (+0.00R)"},
+            {"strategy": "BO", "mode": "Working", "trend": "Improving (+0.40R)"},
+        ]
+    )
+
+    assert portfolio_attribution_note(attribution) == ""
+
+
+def test_portfolio_attribution_note_ignores_unknown_and_warmup_rows():
+    attribution = pd.DataFrame(
+        [
+            {"strategy": "EP", "mode": "Weak", "trend": "Flat (+0.00R)"},
+            {"strategy": "5% BO", "mode": "Unknown", "trend": "Need 15 trades"},
+            {"strategy": "BO", "mode": "Failing", "trend": "Need 30 trades"},
+        ]
+    )
+
+    assert portfolio_attribution_note(attribution) == ""
+
+
+def test_portfolio_attribution_note_reports_multiple_deteriorating_strategies():
+    attribution = pd.DataFrame(
+        [
+            {"strategy": "EP", "mode": "Caution", "trend": "Weakening (-0.30R)"},
+            {"strategy": "5% BO", "mode": "Unknown", "trend": "Need 15 trades"},
+            {"strategy": "BO", "mode": "Weak", "trend": "Recovering (+0.40R)"},
+        ]
+    )
+
+    assert portfolio_attribution_note(attribution) == (
+        "Multiple strategies deteriorating simultaneously: EP, BO. "
+        "Review market regime and trading behavior before setup-specific adjustments."
+    )

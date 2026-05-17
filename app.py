@@ -30,6 +30,7 @@ from stock_calculator.robinhood import (
     display_trade_context_frame,
     normalize_strategy,
     parse_robinhood_csv,
+    portfolio_attribution_note,
 )
 from stock_calculator.risk import (
     MARKET_REGIME_OPTIONS,
@@ -37,6 +38,10 @@ from stock_calculator.risk import (
     normalize_market_regime,
     strategy_mode_for_selection,
     suggested_risk_percent,
+)
+from stock_calculator.strategy_attribution_display import (
+    strategy_attribution_display_strategies,
+    strategy_attribution_strategy_frame,
 )
 from stock_calculator.storage import (
     StorageError,
@@ -108,6 +113,8 @@ def apply_styles() -> None:
             --app-success-soft: var(--st-green-background-color);
             --app-error: var(--st-red-color);
             --app-error-soft: var(--st-red-background-color);
+            --app-warning: var(--st-orange-color, #d97706);
+            --app-warning-soft: var(--st-orange-background-color, #fff7ed);
             --app-mono: 'IBM Plex Mono', 'Cascadia Code', 'Fira Code', monospace;
             --app-sans: 'Barlow Condensed', system-ui, sans-serif;
         }
@@ -390,6 +397,17 @@ def apply_styles() -> None:
         .compact-feedback.error::before {
             background: var(--app-error);
             box-shadow: 0 0 5px var(--app-error), 0 0 10px color-mix(in srgb, var(--app-error), transparent 60%);
+        }
+
+        .compact-feedback.warning {
+            border-color: color-mix(in srgb, var(--app-warning), transparent 55%);
+            background: var(--app-warning-soft);
+            color: var(--app-warning);
+        }
+
+        .compact-feedback.warning::before {
+            background: var(--app-warning);
+            box-shadow: 0 0 5px var(--app-warning), 0 0 10px color-mix(in srgb, var(--app-warning), transparent 60%);
         }
 
         /* ── Primary button ──────────────────────────────────── */
@@ -829,59 +847,11 @@ def strategy_metrics_column_config() -> dict:
     }
 
 
-STRATEGY_ATTRIBUTION_DISPLAY_ROWS = [
-    ("Mode", "mode"),
-    ("Mode Basis", "mode_basis"),
-    ("Trend", "trend"),
-    ("Trend Driver", "trend_driver"),
-    ("Evidence", "evidence"),
-    ("Playbook", "playbook"),
-]
-
-
-def strategy_attribution_display_strategies(strategy_attribution: pd.DataFrame) -> list[str]:
-    strategies = []
-    existing = [str(strategy) for strategy in strategy_attribution.get("strategy", [])]
-    for strategy in STRATEGY_OPTIONS:
-        strategies.append(strategy)
-    for strategy in existing:
-        if strategy and strategy not in strategies:
-            strategies.append(strategy)
-    return strategies
-
-
-def strategy_attribution_display_value(value: object, *, key: str) -> str:
-    if value is None or pd.isna(value):
-        return ""
-    text = str(value).strip()
-    if key == "trend_driver":
-        return text.replace("Profit factor", "PF").replace("profit factor", "PF")
-    return text
-
-
-def strategy_attribution_display_frame(strategy_attribution: pd.DataFrame) -> pd.DataFrame:
-    strategies = strategy_attribution_display_strategies(strategy_attribution)
-    rows_by_strategy = {
-        str(row.get("strategy") or ""): row
-        for _, row in strategy_attribution.iterrows()
+def strategy_attribution_tab_column_config(strategy: str) -> dict:
+    return {
+        "Metric": st.column_config.TextColumn("Metric", width=132),
+        strategy: st.column_config.TextColumn(strategy, width=920),
     }
-    display_rows = []
-    for label, key in STRATEGY_ATTRIBUTION_DISPLAY_ROWS:
-        display_row = {"Metric": label}
-        for strategy in strategies:
-            source_row = rows_by_strategy.get(strategy, {})
-            display_row[strategy] = strategy_attribution_display_value(source_row.get(key), key=key)
-        display_rows.append(display_row)
-    return pd.DataFrame(display_rows, columns=["Metric", *strategies])
-
-
-def strategy_attribution_display_column_config(columns: list[str]) -> dict:
-    column_config = {"Metric": st.column_config.TextColumn("Metric", width=40)}
-    for column in columns:
-        if column == "Metric":
-            continue
-        column_config[column] = st.column_config.TextColumn(column, width=360)
-    return column_config
 
 
 def render_strategy_attribution(strategy_attribution: pd.DataFrame | None) -> None:
@@ -891,17 +861,16 @@ def render_strategy_attribution(strategy_attribution: pd.DataFrame | None) -> No
             "Position sizing is driven by Market Regime and Strategy Mode.",
             "idle",
         )
-        if strategy_attribution is None or strategy_attribution.empty:
-            render_feedback("No strategy attribution is available yet.", "idle")
-            return
-
-        display_frame = strategy_attribution_display_frame(strategy_attribution)
-        st.dataframe(
-            display_frame,
-            column_config=strategy_attribution_display_column_config(list(display_frame.columns)),
-            hide_index=True,
-            width="stretch",
-        )
+        strategies = strategy_attribution_display_strategies(strategy_attribution)
+        tabs = st.tabs(strategies)
+        for strategy, tab in zip(strategies, tabs):
+            with tab:
+                st.dataframe(
+                    strategy_attribution_strategy_frame(strategy_attribution, strategy),
+                    column_config=strategy_attribution_tab_column_config(strategy),
+                    hide_index=True,
+                    width="stretch",
+                )
 
 
 def render_trade_metrics(
@@ -963,6 +932,9 @@ def render_trade_metrics(
         width="stretch",
     )
     render_mode_legend()
+    portfolio_note = portfolio_attribution_note(strategy_attribution)
+    if portfolio_note:
+        render_feedback(portfolio_note, "warning")
     render_strategy_attribution(strategy_attribution)
 
 
@@ -1050,7 +1022,10 @@ if "position_editor_revision" not in st.session_state:
 robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
 trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
 strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
-strategy_attribution = calculate_strategy_attribution(robinhood_derivation.closed_trades)
+strategy_attribution = calculate_strategy_attribution(
+    robinhood_derivation.closed_trades,
+    market_regime=normalize_market_regime(config.market_regime),
+)
 total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
 
 apply_styles()
@@ -1224,7 +1199,10 @@ with st.expander("Robinhood Import", expanded=False):
         robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
         trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
         strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
-        strategy_attribution = calculate_strategy_attribution(robinhood_derivation.closed_trades)
+        strategy_attribution = calculate_strategy_attribution(
+            robinhood_derivation.closed_trades,
+            market_regime=normalize_market_regime(config.market_regime),
+        )
         total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
         render_header(total_pnl, trade_metrics, header_container)
         st.session_state.robinhood_import_result = import_result
