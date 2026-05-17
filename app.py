@@ -1244,6 +1244,7 @@ with st.expander("Robinhood Import", expanded=False):
         imported_result is not None
         or not robinhood_derivation.unmatched_sells.empty
         or not robinhood_derivation.planned_stop_issues.empty
+        or not robinhood_derivation.missing_planned_stop_rows.empty
     ):
         issue_parts = []
         if imported_result is not None and not imported_result.malformed_rows.empty:
@@ -1252,11 +1253,13 @@ with st.expander("Robinhood Import", expanded=False):
             issue_parts.append(f"{len(robinhood_derivation.unmatched_sells)} unmatched sells in stored transactions")
         if not robinhood_derivation.planned_stop_issues.empty:
             issue_parts.append(f"{len(robinhood_derivation.planned_stop_issues)} ambiguous planned stop keys")
+        if not robinhood_derivation.missing_planned_stop_rows.empty:
+            issue_parts.append(f"{len(robinhood_derivation.missing_planned_stop_rows)} missing planned stops")
         if issue_parts:
             render_feedback("Import issues found: " + ", ".join(issue_parts) + ".", "error")
 
-    closed_tab, exit_match_tab, open_tab, issues_tab, raw_tab = st.tabs(
-        ["Closed Trades", "Exit Matches", "Open Lots", "Import Issues", "Clean Transactions"]
+    closed_tab, exit_match_tab, open_tab, grouping_audit_tab, issues_tab, raw_tab = st.tabs(
+        ["Closed Trades", "Exit Matches", "Open Lots", "Split Fills", "Import Issues", "Clean Transactions"]
     )
 
     with closed_tab:
@@ -1294,6 +1297,16 @@ with st.expander("Robinhood Import", expanded=False):
                 width="stretch",
             )
 
+    with grouping_audit_tab:
+        if robinhood_derivation.lot_grouping_audit.empty:
+            render_feedback("No Robinhood split fills were grouped into logical trades.", "idle")
+        else:
+            st.dataframe(
+                display_date_frame(robinhood_derivation.lot_grouping_audit),
+                hide_index=True,
+                width="stretch",
+            )
+
     with issues_tab:
         shown_any_issue = False
         if imported_result is not None and not imported_result.malformed_rows.empty:
@@ -1309,8 +1322,18 @@ with st.expander("Robinhood Import", expanded=False):
         if not robinhood_derivation.planned_stop_issues.empty:
             shown_any_issue = True
             st.dataframe(robinhood_derivation.planned_stop_issues, hide_index=True, width="stretch")
+        if not robinhood_derivation.missing_planned_stop_rows.empty:
+            shown_any_issue = True
+            st.dataframe(
+                display_date_frame(robinhood_derivation.missing_planned_stop_rows),
+                hide_index=True,
+                width="stretch",
+            )
         if not shown_any_issue:
-            render_feedback("No malformed rows, unmatched sells, or ambiguous planned stops were found.", "idle")
+            render_feedback(
+                "No malformed rows, unmatched sells, ambiguous planned stops, or missing planned stops were found.",
+                "idle",
+            )
 
     with raw_tab:
         if st.session_state.robinhood_transactions.empty:

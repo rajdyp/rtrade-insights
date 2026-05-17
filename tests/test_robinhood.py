@@ -244,6 +244,140 @@ def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
     assert result.missing_planned_stops == 0
 
 
+def test_derive_fifo_trades_groups_same_price_split_buys_into_one_logical_closed_trade():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 8, "price": 29.44},
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 1, "price": 29.44},
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 11, "price": 29.44},
+            {"activity_date": "2026-05-12", "symbol": "ROIV", "trans_code": "Sell", "quantity": 20, "price": 32.00},
+        ]
+    )
+    planned = pd.DataFrame(
+        [
+            {
+                "symbol": "ROIV",
+                "buy_date": "2026-05-11",
+                "quantity": 20,
+                "planned_stop": 27.25,
+                "strategy": "EP",
+                "atr": 2.4,
+                "market_regime": "SELECTIVE GO",
+            }
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+    metrics = calculate_trade_metrics(result.closed_trades)
+
+    assert result.exit_matches["quantity"].tolist() == [8, 1, 11]
+    assert len(result.closed_trades) == 1
+    row = result.closed_trades.iloc[0]
+    assert row["symbol"] == "ROIV"
+    assert row["quantity"] == 20
+    assert row["planned_stop"] == 27.25
+    assert row["strategy"] == "EP"
+    assert row["atr"] == 2.4
+    assert row["market_regime"] == "SELECTIVE GO"
+    assert row["buy_price"] == 29.44
+    assert row["sell_price"] == 32.00
+    assert row["buy_amount"] == 588.80
+    assert row["sell_amount"] == 640.00
+    assert row["realized_pnl"] == 51.20
+    assert metrics["trade_count"] == 1
+    assert metrics["win_count"] == 1
+    assert result.missing_planned_stops == 0
+    assert result.lot_grouping_audit.to_dict("records") == [
+        {
+            "symbol": "ROIV",
+            "buy_date": "2026-05-11",
+            "planned_quantity": 20,
+            "split_quantities": "8, 1, 11",
+            "buy_price": 29.44,
+            "planned_stop": 27.25,
+            "strategy": "EP",
+            "atr": 2.4,
+            "market_regime": "SELECTIVE GO",
+            "reason": "Same symbol/date/price buy lots summed to one planned position.",
+        }
+    ]
+
+
+def test_derive_fifo_trades_exact_matches_win_before_split_grouping():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-05-11", "symbol": "AEHR", "trans_code": "Buy", "quantity": 3, "price": 59.00},
+            {"activity_date": "2026-05-11", "symbol": "AEHR", "trans_code": "Buy", "quantity": 4, "price": 59.00},
+            {"activity_date": "2026-05-11", "symbol": "AEHR", "trans_code": "Buy", "quantity": 6, "price": 59.00},
+            {"activity_date": "2026-05-12", "symbol": "AEHR", "trans_code": "Sell", "quantity": 13, "price": 62.00},
+        ]
+    )
+    planned = pd.DataFrame(
+        [
+            {"symbol": "AEHR", "buy_date": "2026-05-11", "quantity": 3, "planned_stop": 56.75, "strategy": "BO"},
+            {"symbol": "AEHR", "buy_date": "2026-05-11", "quantity": 10, "planned_stop": 55.25, "strategy": "5% BO"},
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+
+    assert result.closed_trades["quantity"].tolist() == [3, 10]
+    assert result.closed_trades["planned_stop"].tolist() == [56.75, 55.25]
+    assert result.closed_trades["strategy"].tolist() == ["BO", "5% BO"]
+    assert result.lot_grouping_audit["split_quantities"].tolist() == ["4, 6"]
+
+
+def test_derive_fifo_trades_does_not_group_same_day_buys_with_different_prices():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 8, "price": 29.44},
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 12, "price": 29.45},
+            {"activity_date": "2026-05-12", "symbol": "ROIV", "trans_code": "Sell", "quantity": 20, "price": 32.00},
+        ]
+    )
+    planned = pd.DataFrame(
+        [{"symbol": "ROIV", "buy_date": "2026-05-11", "quantity": 20, "planned_stop": 27.25}],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+
+    assert result.closed_trades["quantity"].tolist() == [8, 12]
+    assert result.closed_trades["planned_stop"].isna().tolist() == [True, True]
+    assert result.missing_planned_stops == 2
+    assert result.lot_grouping_audit.empty
+    assert result.missing_planned_stop_rows[["status", "symbol", "quantity", "buy_price"]].to_dict("records") == [
+        {"status": "Closed", "symbol": "ROIV", "quantity": 8, "buy_price": 29.44},
+        {"status": "Closed", "symbol": "ROIV", "quantity": 12, "buy_price": 29.45},
+    ]
+
+
+def test_derive_fifo_trades_keeps_partially_exited_split_group_out_of_closed_trades():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 8, "price": 29.44},
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 1, "price": 29.44},
+            {"activity_date": "2026-05-11", "symbol": "ROIV", "trans_code": "Buy", "quantity": 11, "price": 29.44},
+            {"activity_date": "2026-05-12", "symbol": "ROIV", "trans_code": "Sell", "quantity": 10, "price": 32.00},
+        ]
+    )
+    planned = pd.DataFrame(
+        [{"symbol": "ROIV", "buy_date": "2026-05-11", "quantity": 20, "planned_stop": 27.25}],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+
+    assert result.closed_trades.empty
+    assert result.exit_matches["quantity"].tolist() == [8, 1, 1]
+    assert result.open_lots["quantity"].tolist() == [10]
+    assert result.open_lots.iloc[0]["planned_stop"] == 27.25
+    assert result.missing_planned_stops == 0
+    assert len(result.lot_grouping_audit) == 1
+
+
 def test_derive_fifo_trades_treats_duplicate_planned_stop_keys_as_missing():
     transactions = pd.DataFrame(
         [
