@@ -92,6 +92,8 @@ STRATEGY_MODE_ADJUSTMENT_K = 0.5
 STRATEGY_MODE_WORKING_THRESHOLD = 0.30
 STRATEGY_MODE_FAILING_THRESHOLD = -0.10
 ATTRIBUTION_TREND_THRESHOLD = 0.25
+ATTRIBUTION_HOLD_TIME_RATIO_THRESHOLD = 1.50
+ATTRIBUTION_HOLD_TIME_RATIO_DELTA_THRESHOLD = 0.30
 STRATEGY_METRIC_COLUMNS = [
     "strategy",
     "trade_count",
@@ -162,11 +164,12 @@ def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | in
         return _empty_trade_metrics()
 
     r_trades = trades.copy()
-    for column in ["planned_stop", "buy_price", "quantity"]:
+    for column in ["planned_stop", "buy_price", "quantity", "atr"]:
         r_trades[column] = pd.to_numeric(r_trades.get(column), errors="coerce")
     r_trades["initial_risk"] = (r_trades["buy_price"] - r_trades["planned_stop"]) * r_trades["quantity"]
     r_trades = r_trades[r_trades["initial_risk"] > 0].copy()
     r_trades["r_multiple"] = r_trades["realized_pnl"] / r_trades["initial_risk"]
+    r_trades["risk_in_atr"] = _risk_in_atr_series(r_trades)
     r_wins = r_trades[r_trades["realized_pnl"] > 0]
     r_losses = r_trades[r_trades["realized_pnl"] < 0]
     average_win_r = _mean(r_wins["r_multiple"])
@@ -180,6 +183,13 @@ def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | in
     gross_loss = abs(float(losses["realized_pnl"].sum()))
     average_win = _mean(wins["realized_pnl"])
     average_loss = _mean(losses["realized_pnl"])
+    average_win_hold = _mean(wins["hold_days"])
+    average_loss_hold = _mean(losses["hold_days"])
+    hold_time_ratio = (
+        average_loss_hold / average_win_hold
+        if average_win_hold is not None and average_win_hold > 0 and average_loss_hold is not None
+        else None
+    )
 
     return {
         "trade_count": len(trades),
@@ -193,17 +203,19 @@ def calculate_trade_metrics(closed_trades: pd.DataFrame) -> dict[str, float | in
         "r_ratio": _safe_round(average_win_r / abs(average_loss_r))
         if average_win_r is not None and average_loss_r
         else None,
+        "average_risk_in_atr": _safe_round(_mean(r_trades["risk_in_atr"])),
         "expectancy_r": _safe_round(expectancy_r),
         "expectancy": _safe_round(_mean(trades["realized_pnl"])),
         "profit_factor": _safe_round(gross_win / gross_loss) if gross_loss else None,
         "average_win": _safe_round(average_win),
         "average_win_percent": _safe_round(_mean(wins["realized_pnl_percent"])),
-        "average_win_hold": _safe_round(_mean(wins["hold_days"]), digits=1),
+        "average_win_hold": _safe_round(average_win_hold, digits=1),
         "win_streak": _longest_streak(trades, winning=True),
         "top_win": _safe_round(wins["realized_pnl"].max()) if not wins.empty else None,
         "average_loss": _safe_round(average_loss),
         "average_loss_percent": _safe_round(_mean(losses["realized_pnl_percent"])),
-        "average_loss_hold": _safe_round(_mean(losses["hold_days"]), digits=1),
+        "average_loss_hold": _safe_round(average_loss_hold, digits=1),
+        "hold_time_ratio": _safe_round(hold_time_ratio),
         "loss_streak": _longest_streak(trades, winning=False),
         "top_loss": _safe_round(losses["realized_pnl"].min()) if not losses.empty else None,
     }
@@ -313,7 +325,7 @@ def calculate_strategy_metrics(closed_trades: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=STRATEGY_METRIC_COLUMNS)
 
 
-def calculate_strategy_attribution(closed_trades: pd.DataFrame) -> pd.DataFrame:
+def calculate_strategy_attribution(closed_trades: pd.DataFrame, *, market_regime: str | None = None) -> pd.DataFrame:
     if closed_trades.empty:
         return pd.DataFrame(columns=STRATEGY_ATTRIBUTION_COLUMNS)
 
@@ -326,14 +338,29 @@ def calculate_strategy_attribution(closed_trades: pd.DataFrame) -> pd.DataFrame:
         grouped_trades = grouped_by_strategy.get(strategy)
         if grouped_trades is None:
             continue
-        rows.append(_strategy_attribution_row(strategy, grouped_trades))
+        rows.append(_strategy_attribution_row(strategy, grouped_trades, market_regime=market_regime))
 
     if not rows:
         return pd.DataFrame(columns=STRATEGY_ATTRIBUTION_COLUMNS)
     return pd.DataFrame(rows, columns=STRATEGY_ATTRIBUTION_COLUMNS)
 
 
-def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> dict[str, str]:
+def portfolio_attribution_note(strategy_attribution: pd.DataFrame | None) -> str:
+    deteriorating = _deteriorating_strategy_names(strategy_attribution)
+    if len(deteriorating) < 2:
+        return ""
+    return (
+        f"Multiple strategies deteriorating simultaneously: {', '.join(deteriorating)}. "
+        "Review market regime and trading behavior before setup-specific adjustments."
+    )
+
+
+def _strategy_attribution_row(
+    strategy: str,
+    grouped_trades: pd.DataFrame,
+    *,
+    market_regime: str | None = None,
+) -> dict[str, str]:
     ordered = grouped_trades.copy()
     ordered["_original_order"] = range(len(ordered))
     ordered["sell_date"] = pd.to_datetime(ordered.get("sell_date"), errors="coerce")
@@ -341,14 +368,15 @@ def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> di
 
     trade_count = len(ordered)
     if trade_count < STRATEGY_MODE_WINDOW:
+        metrics = calculate_trade_metrics(ordered)
         return {
             "strategy": strategy,
             "mode": "Unknown",
             "mode_basis": f"Need {STRATEGY_MODE_WINDOW} valid R trades",
             "trend": f"Need {STRATEGY_MODE_WINDOW} trades",
             "trend_driver": f"Need {STRATEGY_MODE_WINDOW} trades",
-            "evidence": f"{trade_count} closed trades",
-            "playbook": "Keep using Market Regime and Strategy Mode sizing.",
+            "evidence": _low_sample_evidence(trade_count, metrics),
+            "playbook": _attribution_playbook("Unknown", f"Need {STRATEGY_MODE_WINDOW} trades", "", market_regime),
         }
 
     recent = ordered.tail(STRATEGY_MODE_WINDOW)
@@ -363,14 +391,16 @@ def _strategy_attribution_row(strategy: str, grouped_trades: pd.DataFrame) -> di
         "average_win_r": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "average_win_r"),
         "average_loss_r": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "average_loss_r"),
         "loss_streak": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "loss_streak"),
+        "average_risk_in_atr": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "average_risk_in_atr"),
+        "hold_time_ratio": _metric_delta_from_optional_prior(recent_metrics, prior_metrics, "hold_time_ratio"),
     }
     mode = rolling_mode["mode"]
     mode_basis = _mode_basis(rolling_mode)
     trend = _attribution_trend(mode, deltas)
     regime_driver = _regime_driver(recent, mode, trend)
     trend_driver = regime_driver or _trend_metric_driver(mode, trend, deltas, recent_metrics)
-    evidence = _attribution_evidence(recent_metrics, prior_metrics, deltas)
-    playbook = _attribution_playbook(mode, trend_driver)
+    evidence = _attribution_evidence(recent, prior, recent_metrics, prior_metrics, deltas, regime_driver)
+    playbook = _attribution_playbook(mode, trend_driver, trend, market_regime)
 
     return {
         "strategy": strategy,
@@ -439,10 +469,8 @@ def _trend_metric_driver(
             ("Profit factor", deltas.get("profit_factor"), 0.30),
             ("Expectancy R", deltas.get("expectancy_r"), 0.25),
         ]
-        for label, delta, threshold in candidates:
-            if _delta_at_or_above(delta, threshold):
-                return label
-        return "No clear driver"
+        drivers = [label for label, delta, threshold in candidates if _delta_at_or_above(delta, threshold)]
+        return _join_drivers(drivers)
 
     if trend_label == "Weakening":
         candidates = [
@@ -453,13 +481,21 @@ def _trend_metric_driver(
             ("Profit factor", deltas.get("profit_factor"), -0.30),
             ("Expectancy R", deltas.get("expectancy_r"), -ATTRIBUTION_TREND_THRESHOLD),
         ]
+        drivers = []
+        if _hold_time_driver_active(metrics, deltas):
+            drivers.append("Hold time")
         for label, delta, threshold in candidates:
             if label == "Loss streak":
                 if _delta_at_or_above(delta, threshold):
-                    return label
+                    drivers.append(label)
             elif _delta_at_or_below(delta, threshold):
-                return label
+                drivers.append(label)
+        return _join_drivers(drivers)
 
+    if mode in {"Working", "Caution"}:
+        if deltas.get("expectancy_r") is None:
+            return _current_strengths_driver(metrics)
+        return _flat_metric_driver(deltas)
     return "No clear driver"
 
 
@@ -516,20 +552,94 @@ def _expectancy_excluding_regime(tagged: pd.DataFrame, regime: str) -> float | N
     return float(expectancy)
 
 
+def _regime_warmup_status(recent: pd.DataFrame, regime_driver: str | None) -> str:
+    if regime_driver or "market_regime" not in recent.columns:
+        return ""
+
+    tagged = recent.copy()
+    tagged["market_regime"] = tagged["market_regime"].fillna("").astype(str).str.strip()
+    tagged = tagged[tagged["market_regime"] != ""]
+    if len(tagged) < 6:
+        return f"Regime attribution: need {6 - len(tagged)} more tagged trades"
+
+    regime_counts = tagged.groupby("market_regime", sort=False).size()
+    if int((regime_counts >= 3).sum()) < 2:
+        return "Regime attribution: need at least 3 tagged trades in 2 regimes"
+    return ""
+
+
 def _attribution_evidence(
+    recent: pd.DataFrame,
+    prior: pd.DataFrame,
     recent_metrics: dict[str, float | int | None],
     prior_metrics: dict[str, float | int | None] | None,
     deltas: dict[str, float | None],
+    regime_driver: str | None,
 ) -> str:
     if prior_metrics is None:
         pf_text = _metric_value("PF", recent_metrics.get("profit_factor"))
         exp_text = _metric_value("Exp R", recent_metrics.get("expectancy_r"))
+        win_text = _percent_metric_value("Win rate", recent_metrics.get("win_rate"))
+        winner_size_text = _metric_value("Avg win R", recent_metrics.get("average_win_r"))
+        loss_text = _metric_value("Avg loss R", recent_metrics.get("average_loss_r"))
+        risk_text = _metric_value("Risk/ATR", recent_metrics.get("average_risk_in_atr"))
     else:
         pf_text = _metric_comparison("PF", recent_metrics.get("profit_factor"), prior_metrics.get("profit_factor"))
         exp_text = _metric_comparison("Exp R", recent_metrics.get("expectancy_r"), prior_metrics.get("expectancy_r"))
-    win_text = _delta_text("Win rate", deltas.get("win_rate"), suffix=" pts")
-    loss_text = _delta_text("Avg loss R", deltas.get("average_loss_r"), signed=True)
-    return " | ".join(part for part in [pf_text, exp_text, win_text, loss_text] if part)
+        win_text = _percent_metric_comparison(
+            "Win rate",
+            recent_metrics.get("win_rate"),
+            prior_metrics.get("win_rate"),
+            deltas.get("win_rate"),
+        )
+        winner_size_text = _metric_comparison_with_delta(
+            "Avg win R",
+            recent_metrics.get("average_win_r"),
+            prior_metrics.get("average_win_r"),
+            deltas.get("average_win_r"),
+        )
+        loss_text = _metric_comparison_with_delta(
+            "Avg loss R",
+            recent_metrics.get("average_loss_r"),
+            prior_metrics.get("average_loss_r"),
+            deltas.get("average_loss_r"),
+        )
+        risk_text = _risk_in_atr_text(
+            recent_metrics.get("average_risk_in_atr"),
+            prior_metrics.get("average_risk_in_atr"),
+            deltas.get("average_risk_in_atr"),
+        )
+    hold_text = _hold_time_ratio_text(
+        recent_metrics.get("hold_time_ratio"),
+        None if prior_metrics is None else prior_metrics.get("hold_time_ratio"),
+        deltas.get("hold_time_ratio"),
+    )
+    window_text = _window_span_text(recent, prior if prior_metrics is not None else None)
+    regime_text = _regime_warmup_status(recent, regime_driver)
+    return " | ".join(
+        part
+        for part in [
+            pf_text,
+            exp_text,
+            win_text,
+            winner_size_text,
+            loss_text,
+            risk_text,
+            hold_text,
+            window_text,
+            regime_text,
+        ]
+        if part
+    )
+
+
+def _low_sample_evidence(trade_count: int, metrics: dict[str, float | int | None]) -> str:
+    parts = [f"{trade_count} closed trades"]
+    expectancy = _metric_value("Exp R", metrics.get("expectancy_r"))
+    if expectancy:
+        parts.append(expectancy)
+        parts.append("directional only until 15 valid R trades")
+    return " | ".join(parts)
 
 
 def _metric_value(label: str, value: Any) -> str:
@@ -544,12 +654,48 @@ def _metric_comparison(label: str, recent_value: Any, prior_value: Any) -> str:
     return f"{label} {_format_metric_value(recent_value)} vs {_format_metric_value(prior_value)}"
 
 
-def _delta_text(label: str, delta: float | None, *, suffix: str = "", signed: bool = False) -> str:
-    if delta is None:
+def _metric_comparison_with_delta(label: str, recent_value: Any, prior_value: Any, delta: float | None) -> str:
+    comparison = _metric_comparison(label, recent_value, prior_value)
+    if not comparison:
         return ""
-    if signed:
-        return f"{label} {delta:+.2f}{suffix}"
-    return f"{label} {delta:+.1f}{suffix}"
+    if delta is None or pd.isna(delta):
+        return comparison
+    return f"{comparison} ({delta:+.2f})"
+
+
+def _percent_metric_value(label: str, value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return f"{label} {float(value):.1f}%"
+
+
+def _percent_metric_comparison(label: str, recent_value: Any, prior_value: Any, delta: float | None) -> str:
+    if recent_value is None or prior_value is None or pd.isna(recent_value) or pd.isna(prior_value):
+        return ""
+    comparison = f"{label} {float(recent_value):.1f}% vs {float(prior_value):.1f}%"
+    if delta is None or pd.isna(delta):
+        return comparison
+    return f"{comparison} ({delta:+.1f} pts)"
+
+
+def _risk_in_atr_text(recent_value: Any, prior_value: Any, delta: float | None) -> str:
+    if recent_value is None or pd.isna(recent_value):
+        return ""
+    if prior_value is None or pd.isna(prior_value):
+        return _metric_value("Risk/ATR", recent_value)
+    if delta is None:
+        return _metric_comparison("Risk/ATR", recent_value, prior_value)
+    return f"Risk/ATR {_format_metric_value(recent_value)} vs {_format_metric_value(prior_value)} ({delta:+.2f})"
+
+
+def _hold_time_ratio_text(recent_value: Any, prior_value: Any, delta: float | None) -> str:
+    if recent_value is None or pd.isna(recent_value):
+        return ""
+    if prior_value is None or pd.isna(prior_value):
+        return _metric_value("Hold ratio", recent_value)
+    if delta is None:
+        return _metric_comparison("Hold ratio", recent_value, prior_value)
+    return f"Hold ratio {_format_metric_value(recent_value)} vs {_format_metric_value(prior_value)} ({delta:+.2f})"
 
 
 def _format_metric_value(value: Any) -> str:
@@ -560,24 +706,139 @@ def _trend_label(trend: str) -> str:
     return trend.split(" ", maxsplit=1)[0]
 
 
-def _attribution_playbook(mode: str, trend_driver: str) -> str:
+def _attribution_playbook(mode: str, trend_driver: str, trend: str, market_regime: str | None) -> str:
+    regime = str(market_regime or "").strip().upper()
+    trend_label = _trend_label(trend)
+    if mode == "Working" and regime == "NO-GO":
+        return "Strategy is working, but NO-GO regime limits sizing. Wait for GO conditions for full deployment."
+    if mode == "Working" and trend_label == "Weakening":
+        driver_detail = "" if trend_driver == "No clear driver" else f" ({trend_driver})"
+        return f"Early warning: expectancy is declining{driver_detail}. Monitor closely and reduce size proactively if trend continues."
+    if mode == "Caution" and trend_label == "Weakening":
+        return "Trend weakening from Caution. Reduce to Weak-level sizing proactively rather than waiting for mode to drop."
+    if mode == "Caution" and trend_label in {"Improving", "Recovering"}:
+        return "Trend is recovering. Watch for Working status before resuming normal sizing."
     if mode in {"Working", "Caution"}:
-        return "Keep using Market Regime and Strategy Mode sizing."
+        return "Keep using Market Regime and Strategy Mode sizing while monitoring the listed drivers."
     if mode == "Unknown":
-        return "Keep using Market Regime and Strategy Mode sizing."
+        return "Insufficient valid R-trade history; maintain minimum sizing until 15 valid R trades are available."
     if trend_driver == "No clear driver":
         return "Keep risk reduced until mode improves."
     if trend_driver.startswith("Regime filter"):
         return "Tighten entry regime filter before resuming normal activity."
-    if trend_driver == "Loss control":
-        return "Tighten stop discipline and avoid entries where risk can expand."
-    if trend_driver == "Winner size":
-        return "Require cleaner reward/risk and avoid taking profits too quickly."
-    if trend_driver == "Hit rate":
-        return "Increase entry selectivity and reduce marginal setups."
-    if trend_driver == "Loss streak":
-        return "Probe only or pause until the setup stabilizes."
+    driver_advice = _driver_advice(trend_driver)
+    if driver_advice:
+        return driver_advice
     return "Keep risk reduced until mode improves."
+
+
+def _join_drivers(drivers: list[str]) -> str:
+    return " + ".join(drivers) if drivers else "No clear driver"
+
+
+def _flat_metric_driver(deltas: dict[str, float | None]) -> str:
+    candidates = [
+        ("Loss control", deltas.get("average_loss_r"), 0.20),
+        ("Winner size", deltas.get("average_win_r"), 0.20),
+        ("Hit rate", deltas.get("win_rate"), 10.0),
+        ("Profit factor", deltas.get("profit_factor"), 0.30),
+    ]
+    drivers = [label for label, delta, threshold in candidates if _delta_at_or_above(delta, threshold)]
+    if not drivers:
+        return "No clear driver"
+    return f"Contributors: {_join_drivers(drivers)}"
+
+
+def _current_strengths_driver(metrics: dict[str, float | int | None]) -> str:
+    candidates = [
+        ("Hit rate", metrics.get("win_rate"), 50.0),
+        ("Winner size", metrics.get("average_win_r"), 1.50),
+        ("Loss control", metrics.get("average_loss_r"), -0.75),
+        ("Profit factor", metrics.get("profit_factor"), 1.30),
+        ("Expectancy R", metrics.get("expectancy_r"), STRATEGY_MODE_WORKING_THRESHOLD),
+    ]
+    drivers = [label for label, value, threshold in candidates if _metric_at_or_above(value, threshold)]
+    if not drivers:
+        return "No clear driver"
+    return f"Current strengths: {_join_drivers(drivers)}"
+
+
+def _driver_includes(trend_driver: str, label: str) -> bool:
+    return label in _driver_parts(trend_driver)
+
+
+def _driver_parts(trend_driver: str) -> list[str]:
+    normalized = trend_driver.replace("Contributors:", "").replace("Current strengths:", "")
+    return [part.strip() for part in normalized.split("+")]
+
+
+def _driver_advice(trend_driver: str) -> str:
+    advice_by_driver = [
+        ("Hold time", "Losses are being held significantly longer than wins. Enforce time-based or rule-based exits on losing positions."),
+        ("Loss control", "Tighten stop discipline and avoid entries where risk can expand."),
+        ("Winner size", "Require cleaner reward/risk and avoid taking profits too quickly."),
+        ("Hit rate", "Increase entry selectivity and reduce marginal setups."),
+        ("Loss streak", "Probe only or pause until the setup stabilizes."),
+    ]
+    advice = [message for driver, message in advice_by_driver if _driver_includes(trend_driver, driver)]
+    return " ".join(advice[:3])
+
+
+def _metric_at_or_above(value: Any, threshold: float) -> bool:
+    return value is not None and not pd.isna(value) and float(value) >= threshold
+
+
+def _hold_time_driver_active(metrics: dict[str, float | int | None], deltas: dict[str, float | None]) -> bool:
+    ratio = metrics.get("hold_time_ratio")
+    delta = deltas.get("hold_time_ratio")
+    return (
+        ratio is not None
+        and not pd.isna(ratio)
+        and float(ratio) >= ATTRIBUTION_HOLD_TIME_RATIO_THRESHOLD
+        and _delta_at_or_above(delta, ATTRIBUTION_HOLD_TIME_RATIO_DELTA_THRESHOLD)
+    )
+
+
+def _deteriorating_strategy_names(strategy_attribution: pd.DataFrame | None) -> list[str]:
+    if strategy_attribution is None or strategy_attribution.empty:
+        return []
+    names = []
+    for _, row in strategy_attribution.iterrows():
+        strategy = str(row.get("strategy") or "").strip()
+        mode = str(row.get("mode") or "").strip()
+        trend = str(row.get("trend") or "").strip()
+        if not strategy or mode == "Unknown" or trend.startswith("Need "):
+            continue
+        if mode in {"Weak", "Failing"} or _trend_label(trend) == "Weakening":
+            names.append(strategy)
+    return names
+
+
+def _window_span_text(recent: pd.DataFrame, prior: pd.DataFrame | None) -> str:
+    recent_text = _single_window_span_text("Recent", recent)
+    prior_text = _single_window_span_text("Prior", prior) if prior is not None else ""
+    return " | ".join(part for part in [recent_text, prior_text] if part)
+
+
+def _single_window_span_text(label: str, window: pd.DataFrame | None) -> str:
+    if window is None or window.empty or "sell_date" not in window.columns:
+        return ""
+    dates = pd.to_datetime(window["sell_date"], errors="coerce").dropna()
+    if dates.empty:
+        return ""
+    days = int((dates.max() - dates.min()).days) + 1
+    trade_word = "trade" if len(window) == 1 else "trades"
+    day_word = "day" if days == 1 else "days"
+    return f"{label}: {len(window)} {trade_word} over {days} {day_word}"
+
+
+def _risk_in_atr_series(trades: pd.DataFrame) -> pd.Series:
+    atr = pd.to_numeric(trades.get("atr"), errors="coerce")
+    buy_price = pd.to_numeric(trades.get("buy_price"), errors="coerce")
+    planned_stop = pd.to_numeric(trades.get("planned_stop"), errors="coerce")
+    stop_loss_percent = ((buy_price - planned_stop) / buy_price) * 100
+    risk_in_atr = stop_loss_percent / atr
+    return risk_in_atr.where((atr > 0) & (buy_price > 0) & (planned_stop < buy_price))
 
 
 def _delta_at_or_above(delta: float | None, threshold: float) -> bool:
@@ -1095,6 +1356,7 @@ def _empty_trade_metrics() -> dict[str, float | int | None]:
         "average_loss": None,
         "average_loss_percent": None,
         "average_loss_hold": None,
+        "hold_time_ratio": None,
         "loss_streak": 0,
         "top_loss": None,
     }
