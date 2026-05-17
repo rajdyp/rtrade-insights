@@ -86,6 +86,19 @@ OPEN_LOT_COLUMNS = [
 UNMATCHED_SELL_COLUMNS = ["symbol", "sell_date", "quantity", "sell_price"]
 IMPORT_ISSUE_COLUMNS = ["row_number", "issue", "raw_row"]
 PLANNED_STOP_ISSUE_COLUMNS = ["symbol", "buy_date", "quantity", "issue", "detail"]
+MISSING_PLANNED_STOP_COLUMNS = ["status", "symbol", "buy_date", "sell_date", "quantity", "buy_price", "detail"]
+LOT_GROUPING_AUDIT_COLUMNS = [
+    "symbol",
+    "buy_date",
+    "planned_quantity",
+    "split_quantities",
+    "buy_price",
+    "planned_stop",
+    "strategy",
+    "atr",
+    "market_regime",
+    "reason",
+]
 STRATEGY_MODE_WINDOW = 15
 STRATEGY_MODE_LOOKBACK = 20
 STRATEGY_MODE_ADJUSTMENT_K = 0.5
@@ -139,6 +152,8 @@ class TradeDerivation:
     unmatched_sells: pd.DataFrame
     missing_planned_stops: int
     planned_stop_issues: pd.DataFrame
+    missing_planned_stop_rows: pd.DataFrame
+    lot_grouping_audit: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -1009,20 +1024,49 @@ def derive_fifo_trades(
             _empty_unmatched_sells(),
             0,
             _empty_planned_stop_issues(),
+            _empty_missing_planned_stop_rows(),
+            _empty_lot_grouping_audit(),
         )
 
     planned_stop_lookup, planned_stop_issues = _planned_stop_lookup(planned_stops)
     normalized = _normalize_transactions(transactions)
+    buy_lot_matches, lot_grouping_audit = _buy_lot_matches(normalized, planned_stops, planned_stop_lookup)
     lots: defaultdict[str, deque[dict[str, Any]]] = defaultdict(deque)
+    trade_groups: dict[str, dict[str, Any]] = {}
     closed_trades: list[dict[str, Any]] = []
     exit_matches: list[dict[str, Any]] = []
     unmatched_sells: list[dict[str, Any]] = []
 
-    for _, row in normalized.iterrows():
+    for row_index, row in normalized.iterrows():
         symbol = row["symbol"]
         quantity = float(row["quantity"])
         if row["trans_code"] == "Buy":
             buy_date = row["activity_date"]
+            lot_match = buy_lot_matches.get(
+                row_index,
+                {
+                    "logical_trade_id": f"unmatched:{row_index}",
+                    "logical_quantity": quantity,
+                    "planned_stop": None,
+                    "strategy": "",
+                    "atr": None,
+                    "market_regime": "",
+                },
+            )
+            logical_trade_id = str(lot_match["logical_trade_id"])
+            if logical_trade_id not in trade_groups:
+                trade_groups[logical_trade_id] = {
+                    "symbol": symbol,
+                    "buy_date": buy_date,
+                    "quantity": float(lot_match["logical_quantity"]),
+                    "remaining_quantity": float(lot_match["logical_quantity"]),
+                    "planned_stop": lot_match["planned_stop"],
+                    "strategy": lot_match["strategy"],
+                    "atr": lot_match["atr"],
+                    "market_regime": lot_match["market_regime"],
+                    "exit_matches": [],
+                    "closed": False,
+                }
             lots[symbol].append(
                 {
                     "symbol": symbol,
@@ -1030,11 +1074,12 @@ def derive_fifo_trades(
                     "quantity": quantity,
                     "original_quantity": quantity,
                     "buy_price": float(row["price"]),
+                    "logical_trade_id": logical_trade_id,
                     "exit_matches": [],
-                    **planned_stop_lookup.get(
-                        (symbol, buy_date, _quantity_key(quantity)),
-                        {"planned_stop": None, "strategy": "", "atr": None, "market_regime": ""},
-                    ),
+                    "planned_stop": lot_match["planned_stop"],
+                    "strategy": lot_match["strategy"],
+                    "atr": lot_match["atr"],
+                    "market_regime": lot_match["market_regime"],
                 }
             )
             continue
@@ -1070,11 +1115,16 @@ def derive_fifo_trades(
             }
             exit_matches.append(exit_match)
             lot["exit_matches"].append(exit_match)
+            trade_group = trade_groups[lot["logical_trade_id"]]
+            trade_group["exit_matches"].append(exit_match)
+            trade_group["remaining_quantity"] -= matched_quantity
 
             lot["quantity"] -= matched_quantity
             remaining_quantity -= matched_quantity
+            if trade_group["remaining_quantity"] <= 1e-9 and not trade_group["closed"]:
+                closed_trades.append(_aggregate_closed_trade(trade_group))
+                trade_group["closed"] = True
             if lot["quantity"] <= 1e-9:
-                closed_trades.append(_aggregate_closed_trade(lot))
                 lots[symbol].popleft()
 
         if remaining_quantity > 1e-9:
@@ -1113,6 +1163,7 @@ def derive_fifo_trades(
     open_frame = pd.DataFrame(open_lots, columns=OPEN_LOT_COLUMNS)
     unmatched_frame = pd.DataFrame(unmatched_sells, columns=UNMATCHED_SELL_COLUMNS)
     missing_planned_stops = _missing_stop_count(closed_frame) + _missing_stop_count(open_frame)
+    missing_planned_stop_rows = _missing_planned_stop_rows(closed_frame, open_frame)
 
     return TradeDerivation(
         closed_frame,
@@ -1121,6 +1172,8 @@ def derive_fifo_trades(
         unmatched_frame,
         missing_planned_stops,
         planned_stop_issues,
+        missing_planned_stop_rows,
+        lot_grouping_audit,
     )
 
 
@@ -1131,6 +1184,7 @@ def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
     sell_amount = round(sum(float(match["sell_amount"]) for match in matches), 2)
     realized_pnl = round(sell_amount - buy_amount, 2)
     realized_pnl_percent = round((realized_pnl / buy_amount) * 100, 2) if buy_amount else None
+    buy_price = round(buy_amount / quantity, 2) if quantity else None
     sell_price = round(sell_amount / quantity, 2) if quantity else None
     sell_date = max(str(match["sell_date"]) for match in matches)
 
@@ -1143,7 +1197,7 @@ def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
         "strategy": lot["strategy"],
         "atr": lot["atr"],
         "market_regime": lot["market_regime"],
-        "buy_price": float(lot["buy_price"]),
+        "buy_price": buy_price,
         "buy_amount": buy_amount,
         "sell_price": sell_price,
         "sell_amount": sell_amount,
@@ -1183,7 +1237,7 @@ def _normalize_transactions(transactions: pd.DataFrame) -> pd.DataFrame:
     normalized["quantity"] = pd.to_numeric(normalized["quantity"], errors="coerce")
     normalized["price"] = pd.to_numeric(normalized["price"], errors="coerce")
     normalized["side_rank"] = normalized["trans_code"].map({"Buy": 0, "Sell": 1}).fillna(9)
-    return normalized.sort_values(["activity_date", "symbol", "side_rank"]).reset_index(drop=True)
+    return normalized.sort_values(["activity_date", "symbol", "side_rank"], kind="mergesort").reset_index(drop=True)
 
 
 def normalize_strategy(value: Any) -> str:
@@ -1217,6 +1271,113 @@ def _display_optional_text(value: Any) -> str:
         return "N/A"
     text = str(value).strip()
     return text if text and text.lower() not in {"none", "nan"} else "N/A"
+
+
+def _buy_lot_matches(
+    normalized: pd.DataFrame,
+    planned_stops: pd.DataFrame | None,
+    planned_stop_lookup: dict[tuple[str, str, float], dict[str, float | str | None]],
+) -> tuple[dict[int, dict[str, Any]], pd.DataFrame]:
+    matches: dict[int, dict[str, Any]] = {}
+    unmatched_buys: list[tuple[int, pd.Series]] = []
+
+    buys = normalized[normalized["trans_code"] == "Buy"]
+    for row_index, row in buys.iterrows():
+        symbol = str(row["symbol"])
+        buy_date = str(row["activity_date"])
+        quantity = float(row["quantity"])
+        exact_key = (symbol, buy_date, _quantity_key(quantity))
+        exact_match = planned_stop_lookup.get(exact_key)
+        if exact_match is not None:
+            matches[row_index] = {
+                "logical_trade_id": f"exact:{row_index}",
+                "logical_quantity": quantity,
+                **exact_match,
+            }
+            continue
+        unmatched_buys.append((row_index, row))
+
+    planned_entries = _planned_stop_entries(planned_stops)
+    audit_rows: list[dict[str, Any]] = []
+    grouped_buys: defaultdict[tuple[str, str, float], list[tuple[int, pd.Series]]] = defaultdict(list)
+    for row_index, row in unmatched_buys:
+        price = pd.to_numeric(row.get("price"), errors="coerce")
+        if pd.isna(price):
+            continue
+        grouped_buys[(str(row["symbol"]), str(row["activity_date"]), _quantity_key(price))].append((row_index, row))
+
+    for (symbol, buy_date, price), rows in grouped_buys.items():
+        if len(rows) <= 1:
+            continue
+        total_quantity = sum(float(row["quantity"]) for _, row in rows)
+        candidates = [
+            entry
+            for entry in planned_entries
+            if entry["symbol"] == symbol
+            and entry["buy_date"] == buy_date
+            and _quantity_key(entry["quantity"]) == _quantity_key(total_quantity)
+            and entry["planned_stop"] is not None
+        ]
+        if len(candidates) != 1:
+            continue
+
+        planned = candidates[0]
+        logical_trade_id = f"split:{symbol}:{buy_date}:{price:g}:{_quantity_key(total_quantity):g}"
+        for row_index, _ in rows:
+            matches[row_index] = {
+                "logical_trade_id": logical_trade_id,
+                "logical_quantity": total_quantity,
+                "planned_stop": planned["planned_stop"],
+                "strategy": planned["strategy"],
+                "atr": planned["atr"],
+                "market_regime": planned["market_regime"],
+            }
+        split_quantities = ", ".join(str(_clean_quantity(float(row["quantity"]))) for _, row in rows)
+        audit_rows.append(
+            {
+                "symbol": symbol,
+                "buy_date": buy_date,
+                "planned_quantity": _clean_quantity(total_quantity),
+                "split_quantities": split_quantities,
+                "buy_price": float(price),
+                "planned_stop": planned["planned_stop"],
+                "strategy": planned["strategy"],
+                "atr": planned["atr"],
+                "market_regime": planned["market_regime"],
+                "reason": "Same symbol/date/price buy lots summed to one planned position.",
+            }
+        )
+
+    return matches, pd.DataFrame(audit_rows, columns=LOT_GROUPING_AUDIT_COLUMNS)
+
+
+def _planned_stop_entries(planned_stops: pd.DataFrame | None) -> list[dict[str, Any]]:
+    if planned_stops is None or planned_stops.empty:
+        return []
+
+    entries = []
+    for _, row in planned_stops.iterrows():
+        symbol = str(row.get("symbol") or "").upper().strip()
+        if not symbol:
+            continue
+        buy_date = pd.to_datetime(row.get("buy_date"), errors="coerce")
+        quantity = pd.to_numeric(row.get("quantity"), errors="coerce")
+        if pd.isna(buy_date) or pd.isna(quantity):
+            continue
+        planned_stop = pd.to_numeric(row.get("planned_stop"), errors="coerce")
+        atr = pd.to_numeric(row.get("atr"), errors="coerce")
+        entries.append(
+            {
+                "symbol": symbol,
+                "buy_date": buy_date.date().isoformat(),
+                "quantity": float(quantity),
+                "planned_stop": None if pd.isna(planned_stop) else float(planned_stop),
+                "strategy": normalize_strategy(row.get("strategy")),
+                "atr": None if pd.isna(atr) else float(atr),
+                "market_regime": _normalize_market_regime_or_blank(row.get("market_regime")),
+            }
+        )
+    return entries
 
 
 def _planned_stop_lookup(
@@ -1334,6 +1495,37 @@ def _missing_stop_count(frame: pd.DataFrame) -> int:
     return int(frame["planned_stop"].isna().sum())
 
 
+def _missing_planned_stop_rows(closed_frame: pd.DataFrame, open_frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if not closed_frame.empty and "planned_stop" in closed_frame.columns:
+        for _, row in closed_frame[closed_frame["planned_stop"].isna()].iterrows():
+            rows.append(
+                {
+                    "status": "Closed",
+                    "symbol": row.get("symbol"),
+                    "buy_date": row.get("buy_date"),
+                    "sell_date": row.get("sell_date"),
+                    "quantity": row.get("quantity"),
+                    "buy_price": row.get("buy_price"),
+                    "detail": "Closed trade is missing a usable planned stop.",
+                }
+            )
+    if not open_frame.empty and "planned_stop" in open_frame.columns:
+        for _, row in open_frame[open_frame["planned_stop"].isna()].iterrows():
+            rows.append(
+                {
+                    "status": "Open",
+                    "symbol": row.get("symbol"),
+                    "buy_date": row.get("buy_date"),
+                    "sell_date": "",
+                    "quantity": row.get("quantity"),
+                    "buy_price": row.get("buy_price"),
+                    "detail": "Open lot is missing a usable planned stop.",
+                }
+            )
+    return pd.DataFrame(rows, columns=MISSING_PLANNED_STOP_COLUMNS)
+
+
 def _empty_trade_metrics() -> dict[str, float | int | None]:
     return {
         "trade_count": 0,
@@ -1416,6 +1608,14 @@ def _empty_unmatched_sells() -> pd.DataFrame:
 
 def _empty_planned_stop_issues() -> pd.DataFrame:
     return pd.DataFrame(columns=PLANNED_STOP_ISSUE_COLUMNS)
+
+
+def _empty_missing_planned_stop_rows() -> pd.DataFrame:
+    return pd.DataFrame(columns=MISSING_PLANNED_STOP_COLUMNS)
+
+
+def _empty_lot_grouping_audit() -> pd.DataFrame:
+    return pd.DataFrame(columns=LOT_GROUPING_AUDIT_COLUMNS)
 
 
 def _empty_issues() -> pd.DataFrame:
