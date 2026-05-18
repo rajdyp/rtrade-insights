@@ -11,6 +11,9 @@ from stock_calculator.calculations import (
     delete_positions_by_index,
     draft_position,
     empty_positions,
+    percent_of_portfolio,
+    prospective_symbol_exposure_breach,
+    symbol_exposure_breaches,
     weekday_hold_count,
 )
 
@@ -401,3 +404,124 @@ def test_invalid_position_has_blank_sell_lot():
 def test_public_output_columns_exclude_internal_fields():
     assert "portfolio_after_position" not in PUBLIC_OUTPUT_COLUMNS
     assert "validation_error" not in PUBLIC_OUTPUT_COLUMNS
+
+
+def test_percent_of_portfolio_uses_current_portfolio_value():
+    assert percent_of_portfolio(319.55, 19_250) == 1.66
+
+
+def test_percent_of_portfolio_is_blank_for_invalid_portfolio_value():
+    assert percent_of_portfolio(319.55, 0) is None
+    assert percent_of_portfolio(319.55, None) is None
+
+
+def test_symbol_exposure_breaches_sum_multiple_rows_for_same_symbol():
+    positions = pd.DataFrame(
+        [
+            {"symbol": "NVDA", "position_size": 2_500},
+            {"symbol": "nvda", "position_size": 1_600},
+            {"symbol": "AAPL", "position_size": 2_000},
+        ]
+    )
+
+    breaches = symbol_exposure_breaches(
+        positions,
+        portfolio_amount=19_250,
+        max_symbol_exposure_percent=20.0,
+    )
+
+    assert breaches.to_dict("records") == [
+        {"symbol": "NVDA", "position_size": 4_100, "exposure_percent": 21.3},
+    ]
+
+
+def test_symbol_exposure_breaches_uses_strictly_greater_than_limit():
+    positions = pd.DataFrame(
+        [
+            {"symbol": "AAPL", "position_size": 4_000},
+            {"symbol": "MSFT", "position_size": 4_002},
+        ]
+    )
+
+    breaches = symbol_exposure_breaches(
+        positions,
+        portfolio_amount=20_000,
+        max_symbol_exposure_percent=20.0,
+    )
+
+    assert breaches.to_dict("records") == [
+        {"symbol": "MSFT", "position_size": 4_002, "exposure_percent": 20.01},
+    ]
+
+
+def test_symbol_exposure_breaches_returns_empty_when_all_symbols_are_within_limit():
+    positions = pd.DataFrame(
+        [
+            {"symbol": "AAPL", "position_size": 3_900},
+            {"symbol": "MSFT", "position_size": 2_000},
+        ]
+    )
+
+    breaches = symbol_exposure_breaches(
+        positions,
+        portfolio_amount=20_000,
+        max_symbol_exposure_percent=20.0,
+    )
+
+    assert breaches.empty
+
+
+def test_prospective_symbol_exposure_breach_sums_existing_and_draft_same_symbol():
+    positions = pd.DataFrame(
+        [
+            {"symbol": "ABC", "position_size": 3_000},
+            {"symbol": "XYZ", "position_size": 4_500},
+        ]
+    )
+    draft = pd.Series({"symbol": "ABC", "position_size": 1_000})
+
+    breach = prospective_symbol_exposure_breach(
+        positions,
+        draft,
+        portfolio_amount=19_250,
+        max_symbol_exposure_percent=20.0,
+    )
+
+    assert breach is not None
+    assert breach.to_dict() == {"symbol": "ABC", "position_size": 4_000, "exposure_percent": 20.78}
+
+
+def test_prospective_symbol_exposure_breach_ignores_unrelated_existing_breaches():
+    positions = pd.DataFrame(
+        [
+            {"symbol": "XYZ", "position_size": 4_500},
+        ]
+    )
+    draft = pd.Series({"symbol": "ABC", "position_size": 1_000})
+
+    breach = prospective_symbol_exposure_breach(
+        positions,
+        draft,
+        portfolio_amount=19_250,
+        max_symbol_exposure_percent=20.0,
+    )
+
+    assert breach is None
+
+
+def test_prospective_symbol_exposure_breach_returns_none_at_or_below_limit():
+    positions = pd.DataFrame(
+        [
+            {"symbol": "ABC", "position_size": 3_000},
+        ]
+    )
+    draft = pd.Series({"symbol": "ABC", "position_size": 850})
+
+    breach = prospective_symbol_exposure_breach(
+        positions,
+        draft,
+        portfolio_amount=19_250,
+        max_symbol_exposure_percent=20.0,
+    )
+
+    assert breach is None

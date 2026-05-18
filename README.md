@@ -32,6 +32,7 @@ portfolio_amount = 20000.0
 sizing_portfolio_amount = 20000.0
 risk_percent = 0.5
 market_regime = "GO"
+max_symbol_exposure_percent = 20.0
 iex_sizing_price_buffer_percent = 0.25
 iex_sizing_price_buffer_min = 0.05
 iex_sizing_price_buffer_max = 0.10

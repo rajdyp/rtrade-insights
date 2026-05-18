@@ -16,6 +16,9 @@ from stock_calculator.calculations import (
     draft_position,
     format_currency,
     format_percent,
+    percent_of_portfolio,
+    prospective_symbol_exposure_breach,
+    symbol_exposure_breaches,
 )
 from stock_calculator.config import load_config
 from stock_calculator.robinhood import (
@@ -1032,6 +1035,9 @@ apply_styles()
 header_container = st.empty()
 render_header(total_pnl, trade_metrics, header_container)
 
+calculated = calculate_positions(st.session_state.positions)
+visible_calculated = filtered_output(calculated)
+
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
 selected_strategy_mode = strategy_mode_for_selection(strategy_metrics, st.session_state.draft_strategy)
@@ -1084,6 +1090,16 @@ draft_result = calculate_positions(draft)
 draft_row = draft_result.iloc[0]
 draft_error = str(draft_row["validation_error"] or "")
 draft_is_valid = bool(symbol) and not draft_error
+draft_exposure_breach = (
+    prospective_symbol_exposure_breach(
+        visible_calculated,
+        draft_row,
+        portfolio_amount=config.sizing_portfolio_amount,
+        max_symbol_exposure_percent=config.max_symbol_exposure_percent,
+    )
+    if draft_is_valid
+    else None
+)
 
 preview_cols = st.columns(5)
 preview_cols[0].metric("Stop Loss", format_percent(first_value(draft_result, "stop_loss_percent")))
@@ -1095,6 +1111,14 @@ preview_cols[4].metric("Total Risk", format_currency(first_value(draft_result, "
 if draft_error:
     feedback_message = draft_error
     feedback_status = "error"
+elif draft_exposure_breach is not None:
+    feedback_message = (
+        f"Exposure limit: {draft_exposure_breach['symbol']} "
+        f"{format_currency(draft_exposure_breach['position_size'])} "
+        f"({format_percent(draft_exposure_breach['exposure_percent'])}) "
+        f"> {format_percent(config.max_symbol_exposure_percent)}."
+    )
+    feedback_status = "ready"
 elif symbol:
     feedback_message = "Position is ready to add."
     feedback_status = "ready"
@@ -1108,21 +1132,24 @@ with action_cols[0]:
 with action_cols[1]:
     st.button("Add Position", disabled=not draft_is_valid, on_click=add_current_draft, width="stretch")
 
-calculated = calculate_positions(st.session_state.positions)
-visible_calculated = filtered_output(calculated)
-
 total_risk = visible_calculated["risk_amount"].fillna(0).sum()
+total_risk_percent = percent_of_portfolio(total_risk, config.sizing_portfolio_amount)
 total_position_size = visible_calculated["position_size"].fillna(0).sum()
 active_positions = len(visible_calculated)
 invalid_positions = int((visible_calculated["validation_error"].fillna("") != "").sum())
 position_editor_key = f"position_editor_{st.session_state.position_editor_revision}"
+exposure_breaches = symbol_exposure_breaches(
+    visible_calculated,
+    portfolio_amount=config.sizing_portfolio_amount,
+    max_symbol_exposure_percent=config.max_symbol_exposure_percent,
+)
 
 render_section("Positions", "Saved rows remain editable; calculated columns are read-only.")
 
 summary_cols = st.columns([1, 1.15, 1, 1])
 summary_cols[0].metric("Active Positions", active_positions)
 summary_cols[1].metric("Total Position Size", format_currency(total_position_size))
-summary_cols[2].metric("Total Risk", format_currency(total_risk))
+summary_cols[2].metric("Total Risk", format_currency_percent_pair(total_risk, total_risk_percent))
 
 csv_bytes = visible_calculated[PUBLIC_OUTPUT_COLUMNS].to_csv(index=False).encode("utf-8")
 summary_cols[3].download_button(
@@ -1133,6 +1160,19 @@ summary_cols[3].download_button(
     width="stretch",
     disabled=visible_calculated.empty,
 )
+
+if not exposure_breaches.empty:
+    breach_parts = [
+        f"{row['symbol']} exposure is {format_currency(row['position_size'])} "
+        f"({format_percent(row['exposure_percent'])}) of current portfolio"
+        for _, row in exposure_breaches.iterrows()
+    ]
+    render_feedback(
+        "Single-symbol exposure limit exceeded: "
+        + "; ".join(breach_parts)
+        + f"; configured limit is {format_percent(config.max_symbol_exposure_percent)}.",
+        "ready",
+    )
 
 if visible_calculated.empty:
     render_feedback("No positions yet. Add a valid position from the calculator above to start the list.", "idle")

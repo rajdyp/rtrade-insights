@@ -9,6 +9,7 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path):
         sizing_portfolio_amount=20_000.0,
         risk_percent=0.5,
         market_regime="GO",
+        max_symbol_exposure_percent=20.0,
         iex_sizing_price_buffer_percent=0.25,
         iex_sizing_price_buffer_min=0.05,
         iex_sizing_price_buffer_max=0.10,
@@ -24,6 +25,7 @@ portfolio_amount = 50000.0
 sizing_portfolio_amount = 40000.0
 risk_percent = 1.25
 market_regime = "SELECTIVE GO"
+max_symbol_exposure_percent = 15.5
 iex_sizing_price_buffer_percent = 0.75
 iex_sizing_price_buffer_min = 0.03
 iex_sizing_price_buffer_max = 0.20
@@ -37,6 +39,7 @@ iex_sizing_price_buffer_max = 0.20
     assert config.sizing_portfolio_amount == 40_000.0
     assert config.risk_percent == 1.25
     assert config.market_regime == "SELECTIVE GO"
+    assert config.max_symbol_exposure_percent == 15.5
     assert config.iex_sizing_price_buffer_percent == 0.75
     assert config.iex_sizing_price_buffer_min == 0.03
     assert config.iex_sizing_price_buffer_max == 0.20
@@ -68,6 +71,7 @@ def test_load_config_falls_back_per_invalid_field(tmp_path):
 portfolio_amount = -1
 sizing_portfolio_amount = -2
 risk_percent = 0.75
+max_symbol_exposure_percent = -4
 iex_sizing_price_buffer_percent = -0.5
 iex_sizing_price_buffer_min = 0
 iex_sizing_price_buffer_max = -0.25
@@ -80,6 +84,7 @@ iex_sizing_price_buffer_max = -0.25
     assert config.portfolio_amount == 20_000.0
     assert config.sizing_portfolio_amount == 20_000.0
     assert config.risk_percent == 0.75
+    assert config.max_symbol_exposure_percent == 20.0
     assert config.iex_sizing_price_buffer_percent == 0.25
     assert config.iex_sizing_price_buffer_min == 0.05
     assert config.iex_sizing_price_buffer_max == 0.10
@@ -115,6 +120,7 @@ def test_load_config_falls_back_for_invalid_toml(tmp_path):
         sizing_portfolio_amount=20_000.0,
         risk_percent=0.5,
         market_regime="GO",
+        max_symbol_exposure_percent=20.0,
         iex_sizing_price_buffer_percent=0.25,
         iex_sizing_price_buffer_min=0.05,
         iex_sizing_price_buffer_max=0.10,
