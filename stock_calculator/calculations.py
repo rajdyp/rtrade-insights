@@ -214,6 +214,76 @@ def calculate_positions(df: pd.DataFrame, *, as_of: date | None = None) -> pd.Da
     return result[OUTPUT_COLUMNS]
 
 
+def percent_of_portfolio(amount: Any, portfolio_amount: Any) -> float | None:
+    amount_value = _to_float(amount)
+    portfolio_value = _to_float(portfolio_amount)
+    if amount_value is None or portfolio_value is None or portfolio_value <= 0:
+        return None
+    return round((amount_value / portfolio_value) * 100, 2)
+
+
+def symbol_exposure_breaches(
+    positions: pd.DataFrame,
+    *,
+    portfolio_amount: Any,
+    max_symbol_exposure_percent: Any,
+) -> pd.DataFrame:
+    columns = ["symbol", "position_size", "exposure_percent"]
+    portfolio_value = _to_float(portfolio_amount)
+    limit = _to_float(max_symbol_exposure_percent)
+    if positions.empty or portfolio_value is None or portfolio_value <= 0 or limit is None or limit <= 0:
+        return pd.DataFrame(columns=columns)
+    if "symbol" not in positions.columns or "position_size" not in positions.columns:
+        return pd.DataFrame(columns=columns)
+
+    exposure = positions[["symbol", "position_size"]].copy()
+    exposure["symbol"] = exposure["symbol"].fillna("").astype(str).str.upper().str.strip()
+    exposure["position_size"] = pd.to_numeric(exposure["position_size"], errors="coerce")
+    exposure = exposure[(exposure["symbol"] != "") & (exposure["position_size"] > 0)]
+    if exposure.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = exposure.groupby("symbol", as_index=False, sort=True)["position_size"].sum()
+    grouped["exposure_percent"] = ((grouped["position_size"] / portfolio_value) * 100).round(2)
+    breached = grouped[grouped["exposure_percent"] > limit].copy()
+    if breached.empty:
+        return pd.DataFrame(columns=columns)
+    breached = breached.sort_values(["exposure_percent", "symbol"], ascending=[False, True]).reset_index(drop=True)
+    breached["position_size"] = breached["position_size"].round(2)
+    return breached[columns]
+
+
+def prospective_symbol_exposure_breach(
+    positions: pd.DataFrame,
+    draft: pd.DataFrame | pd.Series,
+    *,
+    portfolio_amount: Any,
+    max_symbol_exposure_percent: Any,
+) -> pd.Series | None:
+    draft_frame = draft.to_frame().T if isinstance(draft, pd.Series) else draft.copy()
+    if draft_frame.empty or "symbol" not in draft_frame.columns:
+        return None
+
+    symbol = str(draft_frame.iloc[0].get("symbol") or "").upper().strip()
+    position_size = _to_float(draft_frame.iloc[0].get("position_size"))
+    if not symbol or position_size is None or position_size <= 0:
+        return None
+
+    combined = pd.concat([positions, draft_frame], ignore_index=True)
+    breaches = symbol_exposure_breaches(
+        combined,
+        portfolio_amount=portfolio_amount,
+        max_symbol_exposure_percent=max_symbol_exposure_percent,
+    )
+    if breaches.empty:
+        return None
+
+    matches = breaches[breaches["symbol"] == symbol]
+    if matches.empty:
+        return None
+    return matches.iloc[0]
+
+
 def weekday_hold_count(buy_date: Any, *, as_of: date | None = None) -> int | None:
     parsed_buy_date = _to_date(buy_date)
     if parsed_buy_date is None:
