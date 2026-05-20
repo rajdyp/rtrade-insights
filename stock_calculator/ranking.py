@@ -137,19 +137,15 @@ def parse_rank_text(text: str, *, enrich: bool = False) -> tuple[list[ParsedCand
             continue
 
         parts = stripped.split()
-        if len(parts) not in _allowed_part_counts(enrich):
-            errors.append(ParseError(line_number, _expected_row_message(enrich), raw_line))
-            continue
-
         symbol = parts[0].upper().strip()
         if not symbol:
             errors.append(ParseError(line_number, "Symbol is required.", raw_line))
             continue
 
         try:
-            price, stop, atr, stop_source = _parse_rank_values(parts, strategy=current_strategy, enrich=enrich)
-        except ValueError:
-            errors.append(ParseError(line_number, _numeric_error_message(parts, enrich=enrich), raw_line))
+            price, stop, atr, stop_source = _parse_rank_values(parts, enrich=enrich)
+        except ValueError as exc:
+            errors.append(ParseError(line_number, str(exc) or _expected_row_message(enrich), raw_line))
             continue
 
         candidates.append(
@@ -331,7 +327,7 @@ def enrich_rank_candidates(
 
 def fallback_stop_from_low(today_low: float, price: float) -> float:
     buffer = min(max(0.10, price * 0.002), 1.00)
-    return round(today_low + buffer, 2)
+    return round(today_low - buffer, 2)
 
 
 def _sizing_price(
@@ -487,38 +483,80 @@ def _format_table_row(row: dict[str, object]) -> list[str]:
     ]
 
 
-def _allowed_part_counts(enrich: bool) -> set[int]:
-    return {1, 2, 3, 4} if enrich else {4}
-
-
 def _expected_row_message(enrich: bool) -> str:
     if enrich:
-        return "Expected row format: SYMBOL, SYMBOL VALUE, SYMBOL VALUE ATR%, or SYMBOL PRICE STOP ATR%."
-    return "Expected row format: SYMBOL PRICE STOP ATR%."
+        return "Expected row format: SYMBOL, SYMBOL LOD, SYMBOL LOD ATR%, SYMBOL PRICE LOD ATR%, or add SL:<value>."
+    return "Expected row format: SYMBOL PRICE LOD ATR%, optionally with SL:<value>."
 
 
-def _parse_rank_values(
-    parts: list[str], *, strategy: str, enrich: bool
+def _parse_rank_values(parts: list[str], *, enrich: bool) -> tuple[float | None, float | None, float | None, str]:
+    values, manual_stop = _parse_rank_tokens(parts[1:])
+    if not enrich and len(values) != 3:
+        raise ValueError(_expected_row_message(enrich))
+    if enrich and len(values) > 3:
+        raise ValueError(_expected_row_message(enrich))
+
+    if manual_stop is not None:
+        return _parse_manual_stop_values(values, manual_stop, enrich=enrich)
+    return _parse_lod_values(values, enrich=enrich)
+
+
+def _parse_rank_tokens(tokens: list[str]) -> tuple[list[float], float | None]:
+    values: list[float] = []
+    manual_stop: float | None = None
+
+    for token in tokens:
+        upper_token = token.upper()
+        if upper_token.startswith("SL:"):
+            if manual_stop is not None:
+                raise ValueError("Only one SL:<value> token is allowed.")
+            raw_stop = token[3:]
+            if not raw_stop:
+                raise ValueError("SL:<value> must include a numeric stop loss.")
+            try:
+                manual_stop = float(raw_stop)
+            except ValueError as exc:
+                raise ValueError("SL:<value> must include a numeric stop loss.") from exc
+            continue
+        if "SL:" in upper_token:
+            raise ValueError("SL:<value> must be a separate token after the symbol.")
+        try:
+            values.append(float(token))
+        except ValueError as exc:
+            raise ValueError("Numeric fields must be valid numbers.") from exc
+
+    return values, manual_stop
+
+
+def _parse_manual_stop_values(
+    values: list[float], manual_stop: float, *, enrich: bool
 ) -> tuple[float | None, float | None, float | None, str]:
-    if len(parts) == 4:
-        return float(parts[1]), float(parts[2]), float(parts[3]), "manual"
-    if enrich and len(parts) == 3:
-        stop_source = "manual" if strategy == "BO" else "manual_low_buffer"
-        return None, float(parts[1]), float(parts[2]), stop_source
-    if enrich and len(parts) == 2:
-        stop_source = "manual" if strategy == "BO" else "manual_low_buffer"
-        return None, float(parts[1]), None, stop_source
-    if enrich and len(parts) == 1:
+    if len(values) == 3:
+        return values[0], manual_stop, values[2], "manual_sl"
+    if not enrich:
+        raise ValueError(_expected_row_message(enrich))
+    if len(values) == 0:
+        return None, manual_stop, None, "manual_sl"
+    if len(values) == 1:
+        return None, manual_stop, values[0], "manual_sl"
+    if len(values) == 2:
+        return None, manual_stop, values[1], "manual_sl"
+    raise ValueError(_expected_row_message(enrich))
+
+
+def _parse_lod_values(values: list[float], *, enrich: bool) -> tuple[float | None, float | None, float | None, str]:
+    if len(values) == 3:
+        price, low, atr = values
+        return price, fallback_stop_from_low(low, price), atr, "manual_low_buffer"
+    if not enrich:
+        raise ValueError(_expected_row_message(enrich))
+    if len(values) == 0:
         return None, None, None, ""
-    raise ValueError
-
-
-def _numeric_error_message(parts: list[str], *, enrich: bool) -> str:
-    if enrich and len(parts) == 2:
-        return "Value must be numeric."
-    if enrich and len(parts) == 3:
-        return "Value and ATR must be numeric."
-    return "Price, stop, and ATR must be numeric."
+    if len(values) == 1:
+        return None, values[0], None, "manual_low_buffer"
+    if len(values) == 2:
+        return None, values[0], values[1], "manual_low_buffer"
+    raise ValueError(_expected_row_message(enrich))
 
 
 def _join_table_line(values: list[str], widths: list[int]) -> str:

@@ -110,7 +110,7 @@ Rank grouped candidates:
 .venv/bin/python -m stock_calculator.cli rank --file rank_candidates.txt
 ```
 
-`rank_candidates.txt` uses strategy headers and `SYMBOL PRICE STOP ATR%` rows:
+`rank_candidates.txt` uses strategy headers and `SYMBOL PRICE LOD ATR%` rows:
 
 ```text
 5% BO
@@ -140,7 +140,14 @@ EP
 RIGL 27.83 4.54
 ```
 
-For `BO`, `SYMBOL VALUE ATR%` means Alpaca price, manual stop, and manual ATR %. For `EP` and `5% BO`, `VALUE` means manual LOD; stop is calculated from that LOD with the same low-buffer formula used for Alpaca lows.
+For all strategies, positional low values mean LOD/reference low; stop is calculated as `LOD - min(max($0.10, price * 0.2%), $1.00)`. Add `SL:<value>` anywhere after the symbol to use an exact manual stop loss instead:
+
+```text
+EP
+ROIV 29.10 3.21
+ROIV 31.55 29.10 3.21 SL:29
+ROIV SL:29 3.21
+```
 
 The default Alpaca feed is `iex`; use `--feed delayed_sip` or `--feed sip` only if your Alpaca plan supports it.
 When enrichment fills price from the default `iex` feed, ranking uses a conservative sizing price to reduce oversizing from stale or thin prints: `raw_price + min(max(raw_price * 0.25%, $0.05), $0.10)`. Manual prices, `delayed_sip`, and `sip` are sized exactly.
