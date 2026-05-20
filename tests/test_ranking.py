@@ -48,8 +48,8 @@ def test_parse_rank_text_reports_malformed_rows_with_line_numbers():
     assert [error.line for error in errors] == [2, 4, 5]
     assert [error.message for error in errors] == [
         "Row appears before a strategy header.",
-        "Price, stop, and ATR must be numeric.",
-        "Expected row format: SYMBOL PRICE STOP ATR%.",
+        "Numeric fields must be valid numbers.",
+        "Expected row format: SYMBOL PRICE LOD ATR%, optionally with SL:<value>.",
     ]
 
 
@@ -70,12 +70,55 @@ def test_parse_rank_text_reads_enriched_symbol_and_strategy_based_value_rows():
     assert [(candidate.symbol, candidate.price, candidate.stop, candidate.atr) for candidate in candidates] == [
         ("PINS", None, None, None),
         ("APP", None, 100.25, None),
-        ("NVDA", 921.40, 890.00, 3.6),
+        ("NVDA", 921.40, 889.00, 3.6),
         ("RIGL", None, 27.83, 4.54),
     ]
     assert candidates[1].stop_source == "manual_low_buffer"
-    assert candidates[3].stop_source == "manual"
+    assert candidates[3].stop_source == "manual_low_buffer"
     assert candidates[3].atr_source == "manual"
+
+
+def test_parse_rank_text_accepts_manual_sl_token_anywhere_after_symbol():
+    candidates, errors = parse_rank_text(
+        """
+        EP
+        FIRST SL:29 3.21
+        MIDDLE 29.10 SL:29 3.21
+        LAST 31.55 29.10 3.21 SL:29
+        """,
+        enrich=True,
+    )
+
+    assert errors == []
+    assert [(candidate.symbol, candidate.price, candidate.stop, candidate.atr) for candidate in candidates] == [
+        ("FIRST", None, 29.0, 3.21),
+        ("MIDDLE", None, 29.0, 3.21),
+        ("LAST", 31.55, 29.0, 3.21),
+    ]
+    assert [candidate.stop_source for candidate in candidates] == ["manual_sl", "manual_sl", "manual_sl"]
+
+
+def test_parse_rank_text_rejects_malformed_manual_sl_tokens():
+    candidates, errors = parse_rank_text(
+        """
+        EP
+        BLANK SL:
+        TEXT SL:nope
+        DUP SL:29 SL:28
+        JOINED SL:29:28
+        MANY 31.55 29.10 3.21 1.2 SL:29
+        """,
+        enrich=True,
+    )
+
+    assert candidates == []
+    assert [error.message for error in errors] == [
+        "SL:<value> must include a numeric stop loss.",
+        "SL:<value> must include a numeric stop loss.",
+        "Only one SL:<value> token is allowed.",
+        "SL:<value> must include a numeric stop loss.",
+        "Expected row format: SYMBOL, SYMBOL LOD, SYMBOL LOD ATR%, SYMBOL PRICE LOD ATR%, or add SL:<value>.",
+    ]
 
 
 def test_parse_rank_text_rejects_partial_rows_without_enrichment():
@@ -89,16 +132,16 @@ def test_parse_rank_text_rejects_partial_rows_without_enrichment():
 
     assert candidates == []
     assert [error.message for error in errors] == [
-        "Expected row format: SYMBOL PRICE STOP ATR%.",
-        "Expected row format: SYMBOL PRICE STOP ATR%.",
+        "Expected row format: SYMBOL PRICE LOD ATR%, optionally with SL:<value>.",
+        "Expected row format: SYMBOL PRICE LOD ATR%, optionally with SL:<value>.",
     ]
 
 
 def test_fallback_stop_uses_minimum_percentage_cap_and_rounding():
-    assert fallback_stop_from_low(20.00, 20.00) == 20.10
-    assert fallback_stop_from_low(100.00, 100.00) == 100.20
-    assert fallback_stop_from_low(100.00, 1000.00) == 101.00
-    assert fallback_stop_from_low(50.00, 66.665) == 50.13
+    assert fallback_stop_from_low(20.00, 20.00) == 19.90
+    assert fallback_stop_from_low(100.00, 100.00) == 99.80
+    assert fallback_stop_from_low(100.00, 1000.00) == 99.00
+    assert fallback_stop_from_low(50.00, 66.665) == 49.87
 
 
 def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strategy_groups():
@@ -128,10 +171,10 @@ def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strate
     assert result.groups["5% BO"][0]["symbol"] == "PINS"
     assert result.groups["EP"][0]["mode"] == "Working"
     assert result.groups["EP"][0]["risk_percent"] == 0.5
-    assert result.groups["EP"][0]["risk_in_atr"] == 0.2
+    assert result.groups["EP"][0]["risk_in_atr"] == 0.24
     assert result.groups["5% BO"][0]["mode"] == "Weak"
     assert result.groups["5% BO"][0]["risk_percent"] == 0.12
-    assert result.groups["5% BO"][0]["risk_in_atr"] == 0.43
+    assert result.groups["5% BO"][0]["risk_in_atr"] == 0.52
 
 
 def test_rank_candidates_uses_unknown_mode_when_strategy_metrics_are_missing():
@@ -202,7 +245,7 @@ def test_rank_candidates_enriches_symbol_only_rows_and_records_sources():
     assert row["price"] == 100.0
     assert row["raw_price"] is None
     assert row["sizing_price_buffer"] is None
-    assert row["stop"] == 100.0
+    assert row["stop"] == 99.6
     assert row["atr"] == 5.0
     assert row["price_source"] == "alpaca"
     assert row["stop_source"] == "alpaca_low_buffer"
@@ -213,7 +256,7 @@ def test_rank_candidates_enriches_symbol_only_rows_and_records_sources():
     assert row["atr_timestamp"] == "2026-05-06T00:00:00Z"
 
 
-def test_rank_candidates_interprets_enriched_value_rows_by_strategy():
+def test_rank_candidates_interprets_enriched_value_rows_as_lod_for_all_strategies():
     provider = FakeMarketDataProvider(
         {
             symbol: SimpleNamespace(
@@ -258,39 +301,39 @@ def test_rank_candidates_interprets_enriched_value_rows_by_strategy():
     rows = {row["symbol"]: row for row in result.rows}
 
     assert rows["EPONE"]["price"] == 30.0
-    assert rows["EPONE"]["stop"] == 27.93
+    assert rows["EPONE"]["stop"] == 27.73
     assert rows["EPONE"]["atr"] == 5.5
     assert rows["EPONE"]["stop_source"] == "manual_low_buffer"
     assert rows["EPONE"]["atr_source"] == "alpaca_marketsurge_21d"
     assert rows["EPONE"]["stop_timestamp"] == ""
 
     assert rows["EPATR"]["price"] == 30.0
-    assert rows["EPATR"]["stop"] == 27.93
+    assert rows["EPATR"]["stop"] == 27.73
     assert rows["EPATR"]["atr"] == 4.54
     assert rows["EPATR"]["stop_source"] == "manual_low_buffer"
     assert rows["EPATR"]["atr_source"] == "manual"
 
     assert rows["FIVE"]["price"] == 30.0
-    assert rows["FIVE"]["stop"] == 27.93
+    assert rows["FIVE"]["stop"] == 27.73
     assert rows["FIVE"]["atr"] == 4.54
     assert rows["FIVE"]["stop_source"] == "manual_low_buffer"
     assert rows["FIVE"]["atr_source"] == "manual"
 
     assert rows["BOONE"]["price"] == 30.0
-    assert rows["BOONE"]["stop"] == 27.83
+    assert rows["BOONE"]["stop"] == 27.73
     assert rows["BOONE"]["atr"] == 5.5
-    assert rows["BOONE"]["stop_source"] == "manual"
+    assert rows["BOONE"]["stop_source"] == "manual_low_buffer"
     assert rows["BOONE"]["atr_source"] == "alpaca_marketsurge_21d"
     assert rows["BOONE"]["stop_timestamp"] == ""
 
     assert rows["BOATR"]["price"] == 30.0
-    assert rows["BOATR"]["stop"] == 27.83
+    assert rows["BOATR"]["stop"] == 27.73
     assert rows["BOATR"]["atr"] == 4.54
-    assert rows["BOATR"]["stop_source"] == "manual"
+    assert rows["BOATR"]["stop_source"] == "manual_low_buffer"
     assert rows["BOATR"]["atr_source"] == "manual"
 
 
-def test_rank_candidates_applies_iex_sizing_cushion_to_alpaca_price_after_bo_manual_stop():
+def test_rank_candidates_applies_iex_sizing_cushion_to_alpaca_price_after_manual_sl_stop():
     provider = FakeMarketDataProvider(
         {
             "TEST": SimpleNamespace(
@@ -307,7 +350,7 @@ def test_rank_candidates_applies_iex_sizing_cushion_to_alpaca_price_after_bo_man
     result = rank_candidates(
         """
         BO
-        TEST 29.76 5.7
+        TEST SL:29.76 5.7
         """,
         config=AppConfig(sizing_portfolio_amount=19_250, risk_percent=0.25, market_regime="GO"),
         strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
@@ -322,7 +365,7 @@ def test_rank_candidates_applies_iex_sizing_cushion_to_alpaca_price_after_bo_man
     assert row["raw_price"] == 31.43
     assert row["sizing_price_buffer"] == 0.08
     assert row["stop"] == 29.76
-    assert row["stop_source"] == "manual"
+    assert row["stop_source"] == "manual_sl"
     assert row["shares"] == 110
     assert row["position_size"] == 3466.10
 
@@ -375,14 +418,32 @@ def test_rank_candidates_keeps_strategy_lod_stop_parsing_before_iex_sizing_cushi
     assert rows["EPTEST"]["price"] == 31.51
     assert rows["EPTEST"]["raw_price"] == 31.43
     assert rows["EPTEST"]["sizing_price_buffer"] == 0.08
-    assert rows["EPTEST"]["stop"] == 29.86
+    assert rows["EPTEST"]["stop"] == 29.66
     assert rows["EPTEST"]["stop_source"] == "manual_low_buffer"
 
     assert rows["FIVETEST"]["price"] == 31.51
     assert rows["FIVETEST"]["raw_price"] == 31.43
     assert rows["FIVETEST"]["sizing_price_buffer"] == 0.08
-    assert rows["FIVETEST"]["stop"] == 29.86
+    assert rows["FIVETEST"]["stop"] == 29.66
     assert rows["FIVETEST"]["stop_source"] == "manual_low_buffer"
+
+
+def test_rank_candidates_manual_sl_overrides_lod_computed_stop():
+    result = rank_candidates(
+        """
+        EP
+        TEST 31.55 29.10 3.21 SL:29
+        """,
+        config=AppConfig(sizing_portfolio_amount=19_250, risk_percent=0.25, market_regime="SELECTIVE GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "EP", "mode": "Working"}]),
+        today=date(2026, 5, 7),
+    )
+
+    row = result.rows[0]
+    assert row["price"] == 31.55
+    assert row["stop"] == 29.0
+    assert row["atr"] == 3.21
+    assert row["stop_source"] == "manual_sl"
 
 
 def test_rank_candidates_does_not_apply_sizing_cushion_to_sip_feeds_or_manual_price_rows():
@@ -402,7 +463,7 @@ def test_rank_candidates_does_not_apply_sizing_cushion_to_sip_feeds_or_manual_pr
     sip_result = rank_candidates(
         """
         BO
-        SIPTEST 29.76 5.7
+        SIPTEST SL:29.76 5.7
         """,
         config=AppConfig(sizing_portfolio_amount=4_620, risk_percent=0.25, market_regime="SELECTIVE GO"),
         strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
@@ -422,7 +483,7 @@ def test_rank_candidates_does_not_apply_sizing_cushion_to_sip_feeds_or_manual_pr
     manual_result = rank_candidates(
         """
         BO
-        MANUAL 31.43 29.76 5.7
+        MANUAL 31.43 29.76 5.7 SL:29.76
         """,
         config=AppConfig(sizing_portfolio_amount=4_620, risk_percent=0.25, market_regime="SELECTIVE GO"),
         strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
