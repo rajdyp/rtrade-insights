@@ -3,7 +3,8 @@ from datetime import date
 import pandas as pd
 
 from stock_calculator.calculations import (
-    INPUT_COLUMNS,
+    POSITION_ID_COLUMN,
+    POSITION_SOURCE_COLUMNS,
     PUBLIC_OUTPUT_COLUMNS,
     append_committed_position,
     calculate_positions,
@@ -178,7 +179,8 @@ def test_draft_position_builds_normalized_single_row():
     assert row["buy_date"] == "2026-04-24"
     assert row["share_price"] == 100
     assert pd.isna(row["atr"])
-    assert list(draft.columns) == INPUT_COLUMNS
+    assert list(draft.columns) == POSITION_SOURCE_COLUMNS
+    assert row[POSITION_ID_COLUMN] == ""
 
 
 def test_append_committed_position_adds_valid_draft():
@@ -204,6 +206,8 @@ def test_append_committed_position_adds_valid_draft():
     assert len(result) == 2
     assert result.iloc[0]["symbol"] == "TEST"
     assert result.iloc[1]["symbol"] == "EXISTING"
+    assert result[POSITION_ID_COLUMN].str.startswith("pos_").all()
+    assert result[POSITION_ID_COLUMN].nunique() == 2
 
 
 def test_append_committed_position_rejects_invalid_draft():
@@ -234,6 +238,7 @@ def test_committed_positions_filters_blank_rows():
 
     assert len(result) == 1
     assert result.iloc[0]["symbol"] == "KEEP"
+    assert result.iloc[0][POSITION_ID_COLUMN].startswith("pos_")
 
 
 def test_delete_positions_by_index_deletes_single_row():

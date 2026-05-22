@@ -1,21 +1,25 @@
 import pandas as pd
 import pytest
 
-from stock_calculator.calculations import INPUT_COLUMNS
+from stock_calculator.calculations import POSITION_ID_COLUMN, POSITION_SOURCE_COLUMNS, calculate_positions
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, calculate_trade_metrics, derive_fifo_trades
 from stock_calculator.storage import (
     GoogleSheetsStorage,
     LocalCsvStorage,
+    POSITION_ARCHIVE_COLUMNS,
     StorageConfigurationError,
     append_robinhood_transactions,
     build_storage_backend,
     generate_planned_stops_from_transactions,
     load_planned_stops,
     load_positions,
+    load_positions_archive,
     load_robinhood_transactions,
     save_planned_stops,
     save_positions,
+    save_positions_archive,
     save_robinhood_transactions,
+    upsert_positions_archive,
     upsert_planned_stop,
 )
 
@@ -43,7 +47,8 @@ def test_save_positions_filters_blank_rows(tmp_path):
     loaded = pd.read_csv(path)
 
     assert loaded["symbol"].tolist() == ["KEEP"]
-    assert loaded.columns.tolist() == INPUT_COLUMNS
+    assert loaded.columns.tolist() == POSITION_SOURCE_COLUMNS
+    assert loaded[POSITION_ID_COLUMN].str.startswith("pos_").all()
     assert loaded["atr"].tolist() == [2.5]
 
 
@@ -64,8 +69,9 @@ def test_load_positions_accepts_old_files_without_atr(tmp_path):
 
     loaded = load_positions(path)
 
-    assert loaded.columns.tolist() == INPUT_COLUMNS
+    assert loaded.columns.tolist() == POSITION_SOURCE_COLUMNS
     assert loaded["symbol"].tolist() == ["AAPL"]
+    assert loaded[POSITION_ID_COLUMN].str.startswith("pos_").all()
     assert loaded["atr"].isna().all()
 
 
@@ -74,6 +80,83 @@ def test_load_positions_returns_empty_frame_for_missing_file(tmp_path):
 
     assert loaded.empty
     assert "symbol" in loaded.columns
+    assert POSITION_ID_COLUMN in loaded.columns
+
+
+def test_save_and_load_positions_archive_preserves_visible_table_fields(tmp_path):
+    path = tmp_path / "positions_archive.csv"
+    calculated = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "aapl",
+                    "buy_date": "2026-04-01",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "atr": 2.5,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                }
+            ]
+        )
+    )
+    calculated["strategy"] = "EP"
+
+    save_positions_archive(calculated, path)
+    loaded = load_positions_archive(path)
+
+    assert loaded.columns.tolist() == POSITION_ARCHIVE_COLUMNS
+    assert loaded[POSITION_ID_COLUMN].str.startswith("pos_").all()
+    assert loaded["symbol"].tolist() == ["AAPL"]
+    assert loaded["strategy"].tolist() == ["EP"]
+    assert loaded["number_of_shares"].tolist() == [20]
+    assert loaded["position_size"].tolist() == [2000.0]
+
+
+def test_upsert_positions_archive_updates_matches_and_keeps_deleted_rows():
+    existing = pd.DataFrame(
+        [
+            {
+                POSITION_ID_COLUMN: "pos_keep",
+                "symbol": "KEEP",
+                "buy_date": "2026-04-01",
+                "share_price": 100,
+                "stop_price": 95,
+                "strategy": "EP",
+            },
+            {
+                POSITION_ID_COLUMN: "pos_deleted",
+                "symbol": "OLD",
+                "buy_date": "2026-04-01",
+                "share_price": 50,
+                "stop_price": 45,
+                "strategy": "BO",
+            },
+        ]
+    )
+    updated = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    POSITION_ID_COLUMN: "pos_keep",
+                    "symbol": "KEEP",
+                    "buy_date": "2026-04-01",
+                    "share_price": 110,
+                    "stop_price": 95,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                }
+            ]
+        )
+    )
+    updated["strategy"] = "5% BO"
+
+    result = upsert_positions_archive(existing, updated)
+
+    assert result[POSITION_ID_COLUMN].tolist() == ["pos_keep", "pos_deleted"]
+    assert result.loc[0, "share_price"] == 110
+    assert result.loc[0, "strategy"] == "5% BO"
+    assert result.loc[1, "symbol"] == "OLD"
 
 
 def test_load_robinhood_transactions_returns_empty_frame_for_missing_file(tmp_path):
@@ -376,8 +459,8 @@ def test_google_sheets_empty_sheet_returns_normalized_empty_frame_and_header():
     loaded = backend.load_positions()
 
     assert loaded.empty
-    assert loaded.columns.tolist() == INPUT_COLUMNS
-    assert worksheet.values == [INPUT_COLUMNS]
+    assert loaded.columns.tolist() == POSITION_SOURCE_COLUMNS
+    assert worksheet.values == [POSITION_SOURCE_COLUMNS]
 
 
 def test_google_sheets_save_writes_headers_and_normalized_rows():
@@ -394,6 +477,28 @@ def test_google_sheets_save_writes_headers_and_normalized_rows():
         PLANNED_STOP_COLUMNS,
         ["AAPL", "2026-04-01", 2.0, 190.5, "EP", "", ""],
     ]
+
+
+def test_google_sheets_positions_archive_is_created_and_normalized():
+    spreadsheet = FakeSpreadsheet()
+    backend = GoogleSheetsStorage(spreadsheet)
+    archive = pd.DataFrame(
+        [
+            {
+                "symbol": "aapl",
+                "buy_date": "2026-04-01",
+                "share_price": 100,
+                "stop_price": 95,
+                "strategy": "EP",
+                "number_of_shares": 20,
+            }
+        ]
+    )
+
+    backend.save_positions_archive(archive)
+
+    assert spreadsheet.worksheets["positions_archive"].values[0] == POSITION_ARCHIVE_COLUMNS
+    assert spreadsheet.worksheets["positions_archive"].values[1][1:5] == ["AAPL", "2026-04-01", 100, 95]
 
 
 def test_google_sheets_load_preserves_expected_column_order():

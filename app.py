@@ -8,6 +8,7 @@ import streamlit as st
 
 from stock_calculator.calculations import (
     INPUT_COLUMNS,
+    POSITION_ID_COLUMN,
     PUBLIC_OUTPUT_COLUMNS,
     append_committed_position,
     calculate_positions,
@@ -52,14 +53,17 @@ from stock_calculator.storage import (
     get_storage_backend,
     load_planned_stops,
     load_positions,
+    load_positions_archive,
     load_robinhood_transactions,
     planned_stops_label,
     robinhood_transactions_label,
     save_planned_stops,
     save_positions,
+    save_positions_archive,
     save_robinhood_transactions,
     storage_label,
     upsert_planned_stop,
+    upsert_positions_archive,
 )
 
 
@@ -640,6 +644,31 @@ def upsert_position_strategies(
     return updated
 
 
+def archive_positions_snapshot(positions: pd.DataFrame, strategies: list[str] | None = None) -> None:
+    if positions.empty:
+        return
+
+    archive_frame = positions.copy()
+    if strategies is not None:
+        strategy_values = strategies[: len(archive_frame)]
+        if len(strategy_values) < len(archive_frame):
+            strategy_values.extend(
+                planned_strategy(row, st.session_state.planned_stops)
+                for _, row in archive_frame.iloc[len(strategy_values) :].iterrows()
+            )
+        archive_frame["strategy"] = strategy_values
+    elif "strategy" not in archive_frame.columns:
+        archive_frame["strategy"] = [
+            planned_strategy(row, st.session_state.planned_stops) for _, row in archive_frame.iterrows()
+        ]
+
+    st.session_state.positions_archive = upsert_positions_archive(
+        st.session_state.positions_archive,
+        archive_frame,
+    )
+    save_positions_archive(st.session_state.positions_archive)
+
+
 def existing_planned_market_regime(row: pd.Series, planned_stops: pd.DataFrame) -> str:
     symbol = str(row.get("symbol") or "").upper().strip()
     buy_date = str(row.get("buy_date") or "").strip()
@@ -973,6 +1002,9 @@ def add_current_draft() -> None:
     st.session_state.planned_stops = upsert_planned_stop(st.session_state.planned_stops, calculated_draft.iloc[0])
     save_positions(st.session_state.positions)
     save_planned_stops(st.session_state.planned_stops)
+    archive_row = calculate_positions(st.session_state.positions.iloc[[0]])
+    archive_row.loc[archive_row.index[0], "strategy"] = st.session_state.get("draft_strategy", STRATEGY_OPTIONS[0])
+    archive_positions_snapshot(archive_row)
     st.session_state.draft_symbol = ""
     st.session_state.draft_buy_date = date.today()
     st.session_state.draft_share_price = 0.0
@@ -995,6 +1027,8 @@ def delete_selected_positions(selected_rows: list[int]) -> None:
 
 if "positions" not in st.session_state:
     st.session_state.positions = load_positions()
+if "positions_archive" not in st.session_state:
+    st.session_state.positions_archive = load_positions_archive()
 if "planned_stops" not in st.session_state:
     st.session_state.planned_stops = load_planned_stops()
 if "robinhood_transactions" not in st.session_state:
@@ -1189,7 +1223,9 @@ else:
     )
 
     strategy_values = edited_position_strategies(edited)
-    st.session_state.positions = committed_positions(edited[INPUT_COLUMNS])
+    edited_positions = edited[INPUT_COLUMNS].copy()
+    edited_positions[POSITION_ID_COLUMN] = visible_calculated[POSITION_ID_COLUMN].reset_index(drop=True)
+    st.session_state.positions = committed_positions(edited_positions)
     delete_rows = marked_delete_rows(edited)
     if delete_rows:
         delete_selected_positions(delete_rows)
@@ -1202,6 +1238,7 @@ else:
         strategy_values,
     )
     save_planned_stops(st.session_state.planned_stops)
+    archive_positions_snapshot(visible_calculated, strategy_values)
     invalid_positions = int((visible_calculated["validation_error"].fillna("") != "").sum())
 
 if invalid_positions:
