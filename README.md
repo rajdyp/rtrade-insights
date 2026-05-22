@@ -45,8 +45,12 @@ iex_sizing_price_buffer_max = 0.10
 By default, the app stores local runtime data under `data/`:
 
 - `positions.csv`: editable active-position source data.
+- `positions_archive.csv`: permanent latest-snapshot archive of every position added through the app.
 - `planned_stops.csv`: durable entry stop, strategy, ATR %, and market-regime context.
 - `robinhood_transactions.csv`: cleaned imported Robinhood transactions with duplicate uploads skipped.
+
+`positions_archive.csv` is not an event log and does not track open/closed status. Deleting a row from active
+positions leaves its archive row intact; editing an active position updates the matching archive snapshot.
 
 Treat `data/` as user-local runtime data. It is ignored by git.
 
@@ -57,6 +61,7 @@ When Streamlit secrets include both `[google_sheets]` and `[gcp_service_account]
 Required worksheet tabs are created automatically if missing:
 
 - `positions`
+- `positions_archive`
 - `planned_stops`
 - `robinhood_transactions`
 

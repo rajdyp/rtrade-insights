@@ -6,22 +6,49 @@ from typing import Any, Mapping, Protocol
 
 import pandas as pd
 
-from stock_calculator.calculations import INPUT_COLUMNS, committed_positions, normalize_input_frame
+from stock_calculator.calculations import (
+    POSITION_ID_COLUMN,
+    POSITION_SOURCE_COLUMNS,
+    committed_positions,
+    ensure_position_ids,
+    normalize_input_frame,
+)
 from stock_calculator.risk import normalize_market_regime
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, normalize_strategy
 
 
 DATA_PATH = Path("data/positions.csv")
+POSITIONS_ARCHIVE_PATH = Path("data/positions_archive.csv")
 ROBINHOOD_TRANSACTIONS_PATH = Path("data/robinhood_transactions.csv")
 PLANNED_STOPS_PATH = Path("data/planned_stops.csv")
 
 POSITIONS_WORKSHEET = "positions"
+POSITIONS_ARCHIVE_WORKSHEET = "positions_archive"
 PLANNED_STOPS_WORKSHEET = "planned_stops"
 ROBINHOOD_TRANSACTIONS_WORKSHEET = "robinhood_transactions"
 
 GOOGLE_SHEETS_SECRET = "google_sheets"
 GCP_SERVICE_ACCOUNT_SECRET = "gcp_service_account"
 SPREADSHEET_ID_SECRET = "spreadsheet_id"
+
+POSITION_ARCHIVE_COLUMNS = [
+    POSITION_ID_COLUMN,
+    "symbol",
+    "buy_date",
+    "share_price",
+    "stop_price",
+    "atr",
+    "risk_in_atr",
+    "strategy",
+    "stop_loss_percent",
+    "number_of_shares",
+    "sell_lot",
+    "hold_count",
+    "position_size",
+    "risk_percent",
+    "risk_amount",
+    "portfolio_amount",
+]
 
 _DEFAULT_BACKEND: StorageBackend | None = None
 
@@ -42,6 +69,10 @@ class StorageBackend(Protocol):
 
     def save_positions(self, df: pd.DataFrame) -> None: ...
 
+    def load_positions_archive(self) -> pd.DataFrame: ...
+
+    def save_positions_archive(self, df: pd.DataFrame) -> None: ...
+
     def load_planned_stops(self) -> pd.DataFrame: ...
 
     def save_planned_stops(self, df: pd.DataFrame) -> None: ...
@@ -58,6 +89,7 @@ class StorageBackend(Protocol):
 @dataclass(frozen=True)
 class LocalCsvStorage:
     positions_path: Path = DATA_PATH
+    positions_archive_path: Path = POSITIONS_ARCHIVE_PATH
     planned_stops_path: Path = PLANNED_STOPS_PATH
     transactions_path: Path = ROBINHOOD_TRANSACTIONS_PATH
 
@@ -70,6 +102,12 @@ class LocalCsvStorage:
 
     def save_positions(self, df: pd.DataFrame) -> None:
         _save_positions_csv(df, self.positions_path)
+
+    def load_positions_archive(self) -> pd.DataFrame:
+        return _load_positions_archive_csv(self.positions_archive_path)
+
+    def save_positions_archive(self, df: pd.DataFrame) -> None:
+        _save_positions_archive_csv(df, self.positions_archive_path)
 
     def load_planned_stops(self) -> pd.DataFrame:
         return _load_planned_stops_csv(self.planned_stops_path)
@@ -99,10 +137,20 @@ class GoogleSheetsStorage:
         return "Google Sheets"
 
     def load_positions(self) -> pd.DataFrame:
-        return committed_positions(self._read_table(POSITIONS_WORKSHEET, INPUT_COLUMNS))
+        return committed_positions(self._read_table(POSITIONS_WORKSHEET, POSITION_SOURCE_COLUMNS))
 
     def save_positions(self, df: pd.DataFrame) -> None:
-        self._write_table(POSITIONS_WORKSHEET, committed_positions(df), INPUT_COLUMNS)
+        self._write_table(POSITIONS_WORKSHEET, committed_positions(df), POSITION_SOURCE_COLUMNS)
+
+    def load_positions_archive(self) -> pd.DataFrame:
+        return _normalize_positions_archive(self._read_table(POSITIONS_ARCHIVE_WORKSHEET, POSITION_ARCHIVE_COLUMNS))
+
+    def save_positions_archive(self, df: pd.DataFrame) -> None:
+        self._write_table(
+            POSITIONS_ARCHIVE_WORKSHEET,
+            _normalize_positions_archive(df),
+            POSITION_ARCHIVE_COLUMNS,
+        )
 
     def load_planned_stops(self) -> pd.DataFrame:
         return _normalize_planned_stops(self._read_table(PLANNED_STOPS_WORKSHEET, PLANNED_STOP_COLUMNS))
@@ -248,6 +296,19 @@ def save_positions(df: pd.DataFrame, path: Path | None = None) -> None:
     _save_positions_csv(df, path)
 
 
+def load_positions_archive(path: Path | None = None) -> pd.DataFrame:
+    if path is None:
+        return get_storage_backend().load_positions_archive()
+    return _load_positions_archive_csv(path)
+
+
+def save_positions_archive(df: pd.DataFrame, path: Path | None = None) -> None:
+    if path is None:
+        get_storage_backend().save_positions_archive(df)
+        return
+    _save_positions_archive_csv(df, path)
+
+
 def load_planned_stops(path: Path | None = None) -> pd.DataFrame:
     if path is None:
         return get_storage_backend().load_planned_stops()
@@ -276,13 +337,35 @@ def save_robinhood_transactions(df: pd.DataFrame, path: Path | None = None) -> N
 
 def _load_positions_csv(path: Path = DATA_PATH) -> pd.DataFrame:
     if not path.exists():
-        return normalize_input_frame(pd.DataFrame(columns=INPUT_COLUMNS))
+        return normalize_input_frame(pd.DataFrame(columns=POSITION_SOURCE_COLUMNS))
     return committed_positions(pd.read_csv(path))
 
 
 def _save_positions_csv(df: pd.DataFrame, path: Path = DATA_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    committed_positions(df).to_csv(path, index=False, columns=INPUT_COLUMNS)
+    committed_positions(df).to_csv(path, index=False, columns=POSITION_SOURCE_COLUMNS)
+
+
+def _load_positions_archive_csv(path: Path = POSITIONS_ARCHIVE_PATH) -> pd.DataFrame:
+    if not path.exists():
+        return _normalize_positions_archive(pd.DataFrame(columns=POSITION_ARCHIVE_COLUMNS))
+    return _normalize_positions_archive(pd.read_csv(path))
+
+
+def _save_positions_archive_csv(df: pd.DataFrame, path: Path = POSITIONS_ARCHIVE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _normalize_positions_archive(df).to_csv(path, index=False, columns=POSITION_ARCHIVE_COLUMNS)
+
+
+def upsert_positions_archive(archive: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:
+    current = _normalize_positions_archive(archive)
+    incoming = _normalize_positions_archive(positions)
+    if incoming.empty:
+        return current
+
+    incoming_ids = set(incoming[POSITION_ID_COLUMN].fillna("").astype(str))
+    kept = current[~current[POSITION_ID_COLUMN].isin(incoming_ids)]
+    return _normalize_positions_archive(pd.concat([incoming, kept], ignore_index=True))
 
 
 def _load_planned_stops_csv(path: Path = PLANNED_STOPS_PATH) -> pd.DataFrame:
@@ -376,6 +459,39 @@ def _normalize_robinhood_transactions(df: pd.DataFrame) -> pd.DataFrame:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
     return normalized[normalized["symbol"] != ""].reset_index(drop=True)
+
+
+def _normalize_positions_archive(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    for column in POSITION_ARCHIVE_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
+
+    normalized = normalized[POSITION_ARCHIVE_COLUMNS]
+    normalized[POSITION_ID_COLUMN] = normalized[POSITION_ID_COLUMN].fillna("").astype(str).str.strip()
+    normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
+    normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
+    normalized["strategy"] = normalized["strategy"].apply(normalize_strategy)
+
+    for column in [
+        "share_price",
+        "stop_price",
+        "atr",
+        "risk_in_atr",
+        "stop_loss_percent",
+        "number_of_shares",
+        "sell_lot",
+        "hold_count",
+        "position_size",
+        "risk_percent",
+        "risk_amount",
+        "portfolio_amount",
+    ]:
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+
+    normalized = normalized[normalized["symbol"] != ""].reset_index(drop=True)
+    normalized = ensure_position_ids(normalized)
+    return normalized[POSITION_ARCHIVE_COLUMNS]
 
 
 def _normalize_planned_stops(df: pd.DataFrame) -> pd.DataFrame:

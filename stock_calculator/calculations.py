@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 import pandas as pd
 
+
+POSITION_ID_COLUMN = "position_id"
 
 INPUT_COLUMNS = [
     "symbol",
@@ -17,8 +21,10 @@ INPUT_COLUMNS = [
     "risk_percent",
 ]
 
+POSITION_SOURCE_COLUMNS = [POSITION_ID_COLUMN, *INPUT_COLUMNS]
+
 OUTPUT_COLUMNS = [
-    *INPUT_COLUMNS,
+    *POSITION_SOURCE_COLUMNS,
     "stop_loss_percent",
     "risk_in_atr",
     "risk_amount",
@@ -80,11 +86,12 @@ def empty_positions(rows: int = 8) -> pd.DataFrame:
 
 def normalize_input_frame(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
-    for column in INPUT_COLUMNS:
+    for column in POSITION_SOURCE_COLUMNS:
         if column not in normalized.columns:
             normalized[column] = None
 
-    normalized = normalized[INPUT_COLUMNS]
+    normalized = normalized[POSITION_SOURCE_COLUMNS]
+    normalized[POSITION_ID_COLUMN] = normalized[POSITION_ID_COLUMN].fillna("").astype(str).str.strip()
     normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
     normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
 
@@ -94,9 +101,45 @@ def normalize_input_frame(df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def committed_positions(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_position_ids(
+    df: pd.DataFrame,
+    *,
+    existing_ids: set[str] | None = None,
+    generate: str = "deterministic",
+) -> pd.DataFrame:
+    normalized = df.copy()
+    if POSITION_ID_COLUMN not in normalized.columns:
+        normalized[POSITION_ID_COLUMN] = ""
+
+    normalized[POSITION_ID_COLUMN] = normalized[POSITION_ID_COLUMN].fillna("").astype(str).str.strip()
+    used_ids = set(existing_ids or set())
+    generated_counts: dict[str, int] = {}
+    ids: list[str] = []
+    for _, row in normalized.iterrows():
+        symbol = str(row.get("symbol") or "").strip()
+        position_id = str(row.get(POSITION_ID_COLUMN) or "").strip()
+        if not symbol:
+            ids.append("")
+            continue
+        if position_id and position_id not in used_ids:
+            used_ids.add(position_id)
+            ids.append(position_id)
+            continue
+
+        position_id = _new_position_id(row, used_ids, generated_counts, generate=generate)
+        used_ids.add(position_id)
+        ids.append(position_id)
+
+    normalized[POSITION_ID_COLUMN] = ids
+    return normalized
+
+
+def committed_positions(df: pd.DataFrame, *, assign_missing_ids: bool = True) -> pd.DataFrame:
     normalized = normalize_input_frame(df)
-    return normalized[normalized["symbol"] != ""].reset_index(drop=True)
+    committed = normalized[normalized["symbol"] != ""].reset_index(drop=True)
+    if assign_missing_ids:
+        committed = ensure_position_ids(committed)
+    return committed[POSITION_SOURCE_COLUMNS]
 
 
 def delete_positions_by_index(df: pd.DataFrame, row_indexes: list[int]) -> pd.DataFrame:
@@ -137,16 +180,19 @@ def draft_position(
 
 
 def append_committed_position(positions: pd.DataFrame, draft: pd.DataFrame) -> pd.DataFrame:
-    draft_row = committed_positions(draft)
+    current_positions = committed_positions(positions)
+    draft_row = committed_positions(draft, assign_missing_ids=False)
     if draft_row.empty:
-        return committed_positions(positions)
+        return current_positions
 
     calculated = calculate_positions(draft_row)
     validation_error = str(calculated.iloc[0]["validation_error"] or "")
     if validation_error:
-        return committed_positions(positions)
+        return current_positions
 
-    return committed_positions(pd.concat([draft_row, committed_positions(positions)], ignore_index=True))
+    existing_ids = set(current_positions[POSITION_ID_COLUMN].fillna("").astype(str))
+    draft_row = ensure_position_ids(draft_row, existing_ids=existing_ids, generate="uuid")
+    return committed_positions(pd.concat([draft_row, current_positions], ignore_index=True))
 
 
 def calculate_position(row: pd.Series, *, as_of: date | None = None) -> PositionCalculation:
@@ -212,6 +258,35 @@ def calculate_positions(df: pd.DataFrame, *, as_of: date | None = None) -> pd.Da
         result[field] = [getattr(calculation, field) for calculation in calculations]
 
     return result[OUTPUT_COLUMNS]
+
+
+def _new_position_id(
+    row: pd.Series,
+    used_ids: set[str],
+    generated_counts: dict[str, int],
+    *,
+    generate: str,
+) -> str:
+    if generate == "uuid":
+        while True:
+            candidate = f"pos_{uuid.uuid4().hex[:12]}"
+            if candidate not in used_ids:
+                return candidate
+
+    base = _deterministic_position_id(row)
+    generated_counts[base] = generated_counts.get(base, 0) + 1
+    suffix = generated_counts[base]
+    candidate = base if suffix == 1 else f"{base}_{suffix}"
+    while candidate in used_ids:
+        suffix += 1
+        candidate = f"{base}_{suffix}"
+    return candidate
+
+
+def _deterministic_position_id(row: pd.Series) -> str:
+    values = [str(row.get(column) or "").strip() for column in INPUT_COLUMNS]
+    digest = hashlib.sha1("|".join(values).encode("utf-8")).hexdigest()[:12]
+    return f"pos_{digest}"
 
 
 def percent_of_portfolio(amount: Any, portfolio_amount: Any) -> float | None:
