@@ -87,6 +87,49 @@ universe_domain = "googleapis.com"
 
 For local testing, put secrets in `.streamlit/secrets.toml`. For Streamlit Community Cloud, paste the same TOML into the app secrets settings and deploy with entrypoint `app.py`. Do not commit `.streamlit/secrets.toml`, service account JSON, or `data/`.
 
+### Pull Google Sheets into Local CSV
+
+If you want local testing to keep using `data/*.csv`, leave the Google Sheets sections in `.streamlit/secrets.toml`
+disabled. Enabling those app secrets makes the Streamlit app read and write Google Sheets directly.
+
+Use the standalone sync helper to refresh local CSV snapshots from Google Sheets without changing the app backend:
+
+```bash
+.venv/bin/python tools/sync_gs.py pull
+```
+
+The helper reads its own ignored config from `.sync/google_sheets.toml`:
+
+```toml
+[google_sheets]
+spreadsheet_id = "your-google-sheet-id"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
+```
+
+Preview a sync without writing files:
+
+```bash
+.venv/bin/python tools/sync_gs.py pull --dry-run
+```
+
+To use a different config or destination directory:
+
+```bash
+.venv/bin/python tools/sync_gs.py pull --config path/to/google_sheets.toml --data-dir data
+```
+
 ## CLI
 
 Use the module entrypoint from the virtualenv:
