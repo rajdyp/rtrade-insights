@@ -43,6 +43,15 @@ from stock_calculator.risk import (
     strategy_mode_for_selection,
     suggested_risk_percent,
 )
+from stock_calculator.reporting import (
+    ALL_TIME_LABEL,
+    calculate_strategy_report_metrics,
+    default_report_year_label,
+    filter_frame_by_year,
+    report_scope_label,
+    report_year_options,
+    report_year_value,
+)
 from stock_calculator.strategy_attribution_display import (
     strategy_attribution_display_strategies,
     strategy_attribution_strategy_frame,
@@ -180,6 +189,10 @@ def apply_styles() -> None:
             margin-bottom: 1rem;
         }
 
+        .header-title-block {
+            padding: 0.35rem 0 0.65rem;
+        }
+
         .app-title {
             font-family: var(--app-sans);
             font-size: 1.08rem;
@@ -204,6 +217,12 @@ def apply_styles() -> None:
             color: var(--app-muted);
             margin-top: 0.15rem;
             letter-spacing: 0.04em;
+        }
+
+        .header-meta-block {
+            display: flex;
+            justify-content: flex-end;
+            padding: 0.35rem 0 0.65rem;
         }
 
         .header-meta {
@@ -318,7 +337,8 @@ def apply_styles() -> None:
         /* ── Inputs ──────────────────────────────────────────── */
         div[data-testid="stTextInput"] label,
         div[data-testid="stNumberInput"] label,
-        div[data-testid="stDateInput"] label {
+        div[data-testid="stDateInput"] label,
+        div[data-testid="stSelectbox"] label {
             font-family: var(--app-sans) !important;
             font-size: 0.75rem !important;
             font-weight: 600 !important;
@@ -704,6 +724,28 @@ def display_date_frame(df: pd.DataFrame) -> pd.DataFrame:
     return display_trade_context_frame(frame)
 
 
+def sync_report_year_selection(closed_trades: pd.DataFrame) -> list[str]:
+    options = report_year_options(closed_trades)
+    default = default_report_year_label(closed_trades)
+    previous_options = st.session_state.get("report_year_options", [])
+    selected = st.session_state.get("report_year_widget")
+    should_select_default = selected not in options or (
+        selected == ALL_TIME_LABEL and previous_options == [ALL_TIME_LABEL] and options != [ALL_TIME_LABEL]
+    )
+    if should_select_default:
+        st.session_state.report_year_widget = default
+    st.session_state.report_year_options = options
+    return options
+
+
+def selected_report_year() -> int | None:
+    return report_year_value(st.session_state.get("report_year_widget", ALL_TIME_LABEL))
+
+
+def strategy_scope_text(report_year: int | None) -> str:
+    return "all trades" if report_year is None else f"{report_year} trades"
+
+
 def filtered_output(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["symbol"].astype(str).str.strip() != ""].reset_index(drop=True)
 
@@ -736,22 +778,30 @@ def marked_delete_rows(edited: pd.DataFrame) -> list[int]:
     return [int(index) for index, selected in edited[DELETE_COLUMN].items() if not pd.isna(selected) and bool(selected)]
 
 
-def render_header(total_pnl: float, metrics: dict | None, target=st) -> None:
+def render_header_title(target=st) -> None:
+    target.markdown(
+        """
+        <div class="header-title-block">
+          <div class="app-title">rTRADE INSIGHTS</div>
+          <div class="app-subtitle">Position sizing &amp; portfolio performance tracking</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_header_metrics(total_pnl: float, metrics: dict | None, target=st) -> None:
     total_pnl_percent = (total_pnl / config.portfolio_amount) * 100 if config.portfolio_amount else 0.0
     total_pnl_display = f"{format_currency(total_pnl)} ({format_percent(total_pnl_percent)})"
     metrics = metrics or {}
     outcome_counts_display = (
-        f"WINS {int(metrics.get('win_count') or 0)}"
-        f"&nbsp;&nbsp;LOSSES {int(metrics.get('loss_count') or 0)}"
-        f"&nbsp;&nbsp;BREAKEVENS {int(metrics.get('breakeven_count') or 0)}"
+        f"<strong>WINS</strong> {int(metrics.get('win_count') or 0)}"
+        f"&nbsp;&nbsp;<strong>LOSSES</strong> {int(metrics.get('loss_count') or 0)}"
+        f"&nbsp;&nbsp;<strong>BREAKEVENS</strong> {int(metrics.get('breakeven_count') or 0)}"
     )
     target.markdown(
         f"""
-        <div class="app-header">
-          <div>
-            <div class="app-title">rTRADE INSIGHTS</div>
-            <div class="app-subtitle">Position sizing &amp; portfolio performance tracking</div>
-          </div>
+        <div class="header-meta-block">
           <div class="header-meta">
             <span class="meta-pill"><strong>PORTFOLIO</strong>&nbsp;&nbsp;{escape(format_currency(config.portfolio_amount))}</span>
             <span class="meta-pill"><strong>TOTAL P&amp;L</strong>&nbsp;&nbsp;{escape(total_pnl_display)}</span>
@@ -784,8 +834,8 @@ def render_feedback(message: str, status: str) -> None:
 
 def render_mode_legend() -> None:
     render_feedback(
-        "Mode uses latest 15 valid R trades: > +0.30R Working | 0 to +0.30R Caution | "
-        "-0.10R to 0 Weak | < -0.10R Failing. Adj Score is a variance-adjusted reference.",
+        "Sizing signal thresholds: > +0.30R Working | 0 to +0.30R Caution | "
+        "-0.10R to 0 Weak | < -0.10R Failing. Adj Score is variance-adjusted.",
         "idle",
     )
 
@@ -909,8 +959,10 @@ def render_trade_metrics(
     metrics: dict | None,
     strategy_metrics: pd.DataFrame | None,
     strategy_attribution: pd.DataFrame | None,
+    scope_label: str,
+    strategy_scope: str,
 ) -> None:
-    render_section("Trade Metrics", "Derived from stored Robinhood transactions.")
+    render_section("Trade Metrics", f"Derived from stored Robinhood transactions. View: {scope_label}.")
     if metrics is None:
         render_feedback("Upload a Robinhood CSV to populate trade metrics.", "idle")
         return
@@ -957,11 +1009,17 @@ def render_trade_metrics(
         render_feedback("No strategy breakdown is available yet.", "idle")
         return
 
+    strategy_display = strategy_metrics_display_frame(strategy_metrics)
     st.dataframe(
-        strategy_metrics_display_frame(strategy_metrics),
+        strategy_display,
         column_config=strategy_metrics_column_config(),
         hide_index=True,
         width="stretch",
+    )
+    render_feedback(
+        f"Strategy performance is based on {strategy_scope}. "
+        "Sizing signals use the latest 15 valid R trades.",
+        "idle",
     )
     render_mode_legend()
     portfolio_note = portfolio_attribution_note(strategy_attribution)
@@ -1056,25 +1114,42 @@ if "draft_risk_context" not in st.session_state:
 if "position_editor_revision" not in st.session_state:
     st.session_state.position_editor_revision = 0
 
+apply_styles()
+
 robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
-trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
-strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
+year_options = sync_report_year_selection(robinhood_derivation.closed_trades)
+header_columns = st.columns([0.34, 0.58, 0.08], gap="small", vertical_alignment="center")
+render_header_title(header_columns[0])
+header_columns[2].selectbox("Year", year_options, key="report_year_widget", label_visibility="collapsed")
+report_year = selected_report_year()
+scope_label = report_scope_label(report_year)
+strategy_scope = strategy_scope_text(report_year)
+report_closed_trades = filter_frame_by_year(robinhood_derivation.closed_trades, report_year, "sell_date")
+report_exit_matches = filter_frame_by_year(robinhood_derivation.exit_matches, report_year, "sell_date")
+report_lot_grouping_audit = filter_frame_by_year(robinhood_derivation.lot_grouping_audit, report_year, "buy_date")
+report_robinhood_transactions = filter_frame_by_year(
+    st.session_state.robinhood_transactions,
+    report_year,
+    "activity_date",
+)
+trade_metrics = calculate_trade_metrics(report_closed_trades)
+current_strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
+strategy_metrics = calculate_strategy_report_metrics(report_closed_trades, robinhood_derivation.closed_trades)
 strategy_attribution = calculate_strategy_attribution(
     robinhood_derivation.closed_trades,
     market_regime=normalize_market_regime(config.market_regime),
 )
-total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
+total_pnl = calculate_total_realized_pnl(report_closed_trades)
 
-apply_styles()
-header_container = st.empty()
-render_header(total_pnl, trade_metrics, header_container)
+header_container = header_columns[1].empty()
+render_header_metrics(total_pnl, trade_metrics, header_container)
 
 calculated = calculate_positions(st.session_state.positions)
 visible_calculated = filtered_output(calculated)
 
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
-selected_strategy_mode = strategy_mode_for_selection(strategy_metrics, st.session_state.draft_strategy)
+selected_strategy_mode = strategy_mode_for_selection(current_strategy_metrics, st.session_state.draft_strategy)
 risk_context = (
     normalize_market_regime(st.session_state.draft_market_regime),
     st.session_state.draft_strategy,
@@ -1091,7 +1166,7 @@ if st.session_state.draft_risk_context != risk_context:
 top_cols = st.columns([1.2, 0.95, 1.15, 0.85, 0.7, 1.35, 1.0, 1.0, 0.75])
 symbol = top_cols[0].text_input("Symbol", key="draft_symbol").upper().strip()
 buy_date = top_cols[1].date_input("Buy Date", key="draft_buy_date")
-top_cols[2].selectbox("Market Regime", MARKET_REGIME_OPTIONS, key="draft_market_regime")
+top_cols[2].selectbox("Regime", MARKET_REGIME_OPTIONS, key="draft_market_regime")
 top_cols[3].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
 risk_percent = top_cols[4].number_input(
     "Risk %",
@@ -1274,14 +1349,26 @@ with st.expander("Robinhood Import", expanded=False):
         st.session_state.robinhood_last_added_count = added_count
         st.session_state.robinhood_last_skipped_count = skipped_count
         robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)
-        trade_metrics = calculate_trade_metrics(robinhood_derivation.closed_trades)
-        strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
+        report_year = selected_report_year()
+        scope_label = report_scope_label(report_year)
+        strategy_scope = strategy_scope_text(report_year)
+        report_closed_trades = filter_frame_by_year(robinhood_derivation.closed_trades, report_year, "sell_date")
+        report_exit_matches = filter_frame_by_year(robinhood_derivation.exit_matches, report_year, "sell_date")
+        report_lot_grouping_audit = filter_frame_by_year(robinhood_derivation.lot_grouping_audit, report_year, "buy_date")
+        report_robinhood_transactions = filter_frame_by_year(
+            st.session_state.robinhood_transactions,
+            report_year,
+            "activity_date",
+        )
+        trade_metrics = calculate_trade_metrics(report_closed_trades)
+        current_strategy_metrics = calculate_strategy_metrics(robinhood_derivation.closed_trades)
+        strategy_metrics = calculate_strategy_report_metrics(report_closed_trades, robinhood_derivation.closed_trades)
         strategy_attribution = calculate_strategy_attribution(
             robinhood_derivation.closed_trades,
             market_regime=normalize_market_regime(config.market_regime),
         )
-        total_pnl = calculate_total_realized_pnl(robinhood_derivation.closed_trades)
-        render_header(total_pnl, trade_metrics, header_container)
+        total_pnl = calculate_total_realized_pnl(report_closed_trades)
+        render_header_metrics(total_pnl, trade_metrics, header_container)
         st.session_state.robinhood_import_result = import_result
 
         if import_result.transactions.empty:
@@ -1340,25 +1427,25 @@ with st.expander("Robinhood Import", expanded=False):
     )
 
     with closed_tab:
-        if robinhood_derivation.closed_trades.empty:
-            render_feedback("No closed trades were derived from stored Robinhood transactions.", "idle")
+        if report_closed_trades.empty:
+            render_feedback(f"No closed trades are available for {scope_label}.", "idle")
         else:
             st.dataframe(
-                display_date_frame(robinhood_derivation.closed_trades),
+                display_date_frame(report_closed_trades),
                 column_config=closed_trades_column_config(),
-                height=robinhood_dataframe_height(len(robinhood_derivation.closed_trades)),
+                height=robinhood_dataframe_height(len(report_closed_trades)),
                 hide_index=True,
                 width="stretch",
             )
 
     with exit_match_tab:
-        if robinhood_derivation.exit_matches.empty:
-            render_feedback("No FIFO exit matches were derived from stored Robinhood transactions.", "idle")
+        if report_exit_matches.empty:
+            render_feedback(f"No FIFO exit matches are available for {scope_label}.", "idle")
         else:
             st.dataframe(
-                display_date_frame(robinhood_derivation.exit_matches),
+                display_date_frame(report_exit_matches),
                 column_config=closed_trades_column_config(),
-                height=robinhood_dataframe_height(len(robinhood_derivation.exit_matches)),
+                height=robinhood_dataframe_height(len(report_exit_matches)),
                 hide_index=True,
                 width="stretch",
             )
@@ -1375,11 +1462,11 @@ with st.expander("Robinhood Import", expanded=False):
             )
 
     with grouping_audit_tab:
-        if robinhood_derivation.lot_grouping_audit.empty:
-            render_feedback("No Robinhood split fills were grouped into logical trades.", "idle")
+        if report_lot_grouping_audit.empty:
+            render_feedback(f"No Robinhood split fills were grouped into logical trades for {scope_label}.", "idle")
         else:
             st.dataframe(
-                display_date_frame(robinhood_derivation.lot_grouping_audit),
+                display_date_frame(report_lot_grouping_audit),
                 hide_index=True,
                 width="stretch",
             )
@@ -1413,15 +1500,15 @@ with st.expander("Robinhood Import", expanded=False):
             )
 
     with raw_tab:
-        if st.session_state.robinhood_transactions.empty:
-            render_feedback("No clean Robinhood transactions are stored yet.", "idle")
+        if report_robinhood_transactions.empty:
+            render_feedback(f"No clean Robinhood transactions are available for {scope_label}.", "idle")
         else:
             st.dataframe(
-                display_date_frame(st.session_state.robinhood_transactions),
-                height=robinhood_dataframe_height(len(st.session_state.robinhood_transactions)),
+                display_date_frame(report_robinhood_transactions),
+                height=robinhood_dataframe_height(len(report_robinhood_transactions)),
                 hide_index=True,
                 width="stretch",
             )
 
 with trade_metrics_container:
-    render_trade_metrics(trade_metrics, strategy_metrics, strategy_attribution)
+    render_trade_metrics(trade_metrics, strategy_metrics, strategy_attribution, scope_label, strategy_scope)
