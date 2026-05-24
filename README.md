@@ -161,7 +161,7 @@ Rank grouped candidates:
 `rank_candidates.txt` uses strategy headers and `SYMBOL PRICE LOD ATR%` rows:
 
 ```text
-5% BO
+4% BO
 PINS 21.16 20.69 5.2
 
 EP
@@ -218,7 +218,7 @@ Rank candidates through `/rank`:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/rank?format=table" \
-  --data-binary $'5% BO\nPINS 21.16 20.69 5.2\n\nEP\nNVDA 100 95 5\n'
+  --data-binary $'4% BO\nPINS 21.16 20.69 5.2\n\nEP\nNVDA 100 95 5\n'
 ```
 
 Supported formats are `table`, `csv`, and `json`. The API calculates rankings only; it does not save positions.

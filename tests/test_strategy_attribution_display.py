@@ -20,10 +20,10 @@ def test_strategy_attribution_display_strategies_keeps_configured_order_and_appe
 def test_strategy_attribution_strategy_frame_reports_missing_configured_strategy():
     attribution = pd.DataFrame([{"strategy": "EP", "mode": "Working"}])
 
-    frame = strategy_attribution_strategy_frame(attribution, "5% BO")
+    frame = strategy_attribution_strategy_frame(attribution, "4% BO")
 
-    assert frame.columns.tolist() == ["Metric", "5% BO"]
-    assert frame_records(frame) == [{"Metric": "Status", "5% BO": "No attribution yet"}]
+    assert frame.columns.tolist() == ["Metric", "4% BO"]
+    assert frame_records(frame) == [{"Metric": "Status", "4% BO": "No attribution yet"}]
 
 
 def test_strategy_attribution_strategy_frame_keeps_warmup_rows_when_attribution_exists():
