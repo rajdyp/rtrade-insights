@@ -229,7 +229,7 @@ def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
     )
     planned = pd.DataFrame(
         [
-            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 4, "planned_stop": 55.25, "strategy": "5% BO"},
+            {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 4, "planned_stop": 55.25, "strategy": "4% BO"},
             {"symbol": "AEHR", "buy_date": "2026-04-08", "quantity": 3, "planned_stop": 56.75, "strategy": "BO"},
         ],
         columns=PLANNED_STOP_COLUMNS,
@@ -238,9 +238,9 @@ def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
     result = derive_fifo_trades(transactions, planned)
 
     assert result.closed_trades["planned_stop"].tolist() == [56.75, 55.25]
-    assert result.closed_trades["strategy"].tolist() == ["BO", "5% BO"]
+    assert result.closed_trades["strategy"].tolist() == ["BO", "4% BO"]
     assert result.exit_matches["planned_stop"].tolist() == [56.75, 55.25]
-    assert result.exit_matches["strategy"].tolist() == ["BO", "5% BO"]
+    assert result.exit_matches["strategy"].tolist() == ["BO", "4% BO"]
     assert result.missing_planned_stops == 0
 
 
@@ -316,7 +316,7 @@ def test_derive_fifo_trades_exact_matches_win_before_split_grouping():
     planned = pd.DataFrame(
         [
             {"symbol": "AEHR", "buy_date": "2026-05-11", "quantity": 3, "planned_stop": 56.75, "strategy": "BO"},
-            {"symbol": "AEHR", "buy_date": "2026-05-11", "quantity": 10, "planned_stop": 55.25, "strategy": "5% BO"},
+            {"symbol": "AEHR", "buy_date": "2026-05-11", "quantity": 10, "planned_stop": 55.25, "strategy": "4% BO"},
         ],
         columns=PLANNED_STOP_COLUMNS,
     )
@@ -325,7 +325,7 @@ def test_derive_fifo_trades_exact_matches_win_before_split_grouping():
 
     assert result.closed_trades["quantity"].tolist() == [3, 10]
     assert result.closed_trades["planned_stop"].tolist() == [56.75, 55.25]
-    assert result.closed_trades["strategy"].tolist() == ["BO", "5% BO"]
+    assert result.closed_trades["strategy"].tolist() == ["BO", "4% BO"]
     assert result.lot_grouping_audit["split_quantities"].tolist() == ["4, 6"]
 
 
@@ -501,13 +501,13 @@ def test_derive_fifo_trades_copies_strategy_to_open_lots():
         ]
     )
     planned = pd.DataFrame(
-        [{"symbol": "IONQ", "buy_date": "2026-04-15", "quantity": 9, "planned_stop": 35.50, "strategy": "5% BO"}],
+        [{"symbol": "IONQ", "buy_date": "2026-04-15", "quantity": 9, "planned_stop": 35.50, "strategy": "4% BO"}],
         columns=PLANNED_STOP_COLUMNS,
     )
 
     result = derive_fifo_trades(transactions, planned)
 
-    assert result.open_lots.iloc[0]["strategy"] == "5% BO"
+    assert result.open_lots.iloc[0]["strategy"] == "4% BO"
 
 
 def test_calculate_trade_metrics_from_closed_trades():
@@ -1322,7 +1322,7 @@ def test_portfolio_attribution_note_ignores_unknown_and_warmup_rows():
     attribution = pd.DataFrame(
         [
             {"strategy": "EP", "mode": "Weak", "trend": "Flat (+0.00R)"},
-            {"strategy": "5% BO", "mode": "Unknown", "trend": "Need 15 trades"},
+            {"strategy": "4% BO", "mode": "Unknown", "trend": "Need 15 trades"},
             {"strategy": "BO", "mode": "Failing", "trend": "Need 30 trades"},
         ]
     )
@@ -1334,7 +1334,7 @@ def test_portfolio_attribution_note_reports_multiple_deteriorating_strategies():
     attribution = pd.DataFrame(
         [
             {"strategy": "EP", "mode": "Caution", "trend": "Weakening (-0.30R)"},
-            {"strategy": "5% BO", "mode": "Unknown", "trend": "Need 15 trades"},
+            {"strategy": "4% BO", "mode": "Unknown", "trend": "Need 15 trades"},
             {"strategy": "BO", "mode": "Weak", "trend": "Recovering (+0.40R)"},
         ]
     )

@@ -149,13 +149,13 @@ def test_upsert_positions_archive_updates_matches_and_keeps_deleted_rows():
             ]
         )
     )
-    updated["strategy"] = "5% BO"
+    updated["strategy"] = "4% BO"
 
     result = upsert_positions_archive(existing, updated)
 
     assert result[POSITION_ID_COLUMN].tolist() == ["pos_keep", "pos_deleted"]
     assert result.loc[0, "share_price"] == 110
-    assert result.loc[0, "strategy"] == "5% BO"
+    assert result.loc[0, "strategy"] == "4% BO"
     assert result.loc[1, "symbol"] == "OLD"
 
 
@@ -549,7 +549,7 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
             "buy_date": "2026-04-01",
             "number_of_shares": 2,
             "stop_price": 190.5,
-            "strategy": "5% BO",
+            "strategy": "4% BO",
             "atr": 4.25,
             "market_regime": "SELECTIVE GO",
         }
@@ -560,7 +560,7 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
 
     assert worksheet.values == [
         PLANNED_STOP_COLUMNS,
-        ["AAPL", "2026-04-01", 2, 190.5, "5% BO", 4.25, "SELECTIVE GO"],
+        ["AAPL", "2026-04-01", 2, 190.5, "4% BO", 4.25, "SELECTIVE GO"],
     ]
 
 

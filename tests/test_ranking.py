@@ -19,7 +19,7 @@ def test_parse_rank_text_reads_grouped_compact_rows():
     candidates, errors = parse_rank_text(
         """
         # Candidates
-        5% BO
+        4% BO
         pins 21.16 20.69 5.2
 
         EP
@@ -29,7 +29,7 @@ def test_parse_rank_text_reads_grouped_compact_rows():
 
     assert errors == []
     assert [(candidate.strategy, candidate.symbol, candidate.price) for candidate in candidates] == [
-        ("5% BO", "PINS", 21.16),
+        ("4% BO", "PINS", 21.16),
         ("EP", "NVDA", 921.40),
     ]
 
@@ -147,7 +147,7 @@ def test_fallback_stop_uses_minimum_percentage_cap_and_rounding():
 def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strategy_groups():
     result = rank_candidates(
         """
-        5% BO
+        4% BO
         PINS 21.16 20.69 5.2
 
         EP
@@ -158,7 +158,7 @@ def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strate
         strategy_metrics=pd.DataFrame(
             [
                 {"strategy": "EP", "mode": "Working"},
-                {"strategy": "5% BO", "mode": "Weak"},
+                {"strategy": "4% BO", "mode": "Weak"},
             ]
         ),
         today=date(2026, 5, 7),
@@ -166,15 +166,15 @@ def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strate
 
     assert result.warnings == []
     assert [row["symbol"] for row in result.rows] == ["AAPL", "NVDA", "PINS"]
-    assert list(result.groups) == ["EP", "5% BO", "BO"]
+    assert list(result.groups) == ["EP", "4% BO", "BO"]
     assert [row["symbol"] for row in result.groups["EP"]] == ["AAPL", "NVDA"]
-    assert result.groups["5% BO"][0]["symbol"] == "PINS"
+    assert result.groups["4% BO"][0]["symbol"] == "PINS"
     assert result.groups["EP"][0]["mode"] == "Working"
     assert result.groups["EP"][0]["risk_percent"] == 0.5
     assert result.groups["EP"][0]["risk_in_atr"] == 0.24
-    assert result.groups["5% BO"][0]["mode"] == "Weak"
-    assert result.groups["5% BO"][0]["risk_percent"] == 0.12
-    assert result.groups["5% BO"][0]["risk_in_atr"] == 0.52
+    assert result.groups["4% BO"][0]["mode"] == "Weak"
+    assert result.groups["4% BO"][0]["risk_percent"] == 0.12
+    assert result.groups["4% BO"][0]["risk_in_atr"] == 0.52
 
 
 def test_rank_candidates_uses_unknown_mode_when_strategy_metrics_are_missing():
@@ -277,7 +277,7 @@ def test_rank_candidates_interprets_enriched_value_rows_as_lod_for_all_strategie
         EPONE 27.83
         EPATR 27.83 4.54
 
-        5% BO
+        4% BO
         FIVE 27.83 4.54
 
         BO
@@ -288,7 +288,7 @@ def test_rank_candidates_interprets_enriched_value_rows_as_lod_for_all_strategie
         strategy_metrics=pd.DataFrame(
             [
                 {"strategy": "EP", "mode": "Working"},
-                {"strategy": "5% BO", "mode": "Working"},
+                {"strategy": "4% BO", "mode": "Working"},
                 {"strategy": "BO", "mode": "Working"},
             ]
         ),
@@ -397,14 +397,14 @@ def test_rank_candidates_keeps_strategy_lod_stop_parsing_before_iex_sizing_cushi
         EP
         EPTEST 29.76 5.7
 
-        5% BO
+        4% BO
         FIVETEST 29.76 5.7
         """,
         config=AppConfig(sizing_portfolio_amount=4_620, risk_percent=0.25, market_regime="SELECTIVE GO"),
         strategy_metrics=pd.DataFrame(
             [
                 {"strategy": "EP", "mode": "Working"},
-                {"strategy": "5% BO", "mode": "Working"},
+                {"strategy": "4% BO", "mode": "Working"},
             ]
         ),
         today=date(2026, 5, 7),
@@ -583,11 +583,11 @@ def test_table_csv_and_json_render_same_ranked_rows():
     ]
     assert "TEST" in csv_output
     assert "rows" not in json_payload
-    assert list(json_payload["groups"]) == ["EP", "5% BO", "BO"]
+    assert list(json_payload["groups"]) == ["EP", "4% BO", "BO"]
     assert json_payload["groups"]["EP"][0]["symbol"] == "TEST"
     assert json_payload["groups"]["EP"][0]["risk_percent"] == 0.5
     assert "price_source" in json_payload["groups"]["EP"][0]
-    assert json_payload["groups"]["5% BO"] == []
+    assert json_payload["groups"]["4% BO"] == []
     assert json_payload["groups"]["BO"] == []
 
 
@@ -597,7 +597,7 @@ def test_table_and_csv_render_rows_by_strategy_group_order():
         BO
         BOA 100 99 5
 
-        5% BO
+        4% BO
         FIVE 100 99 5
 
         EP
@@ -608,7 +608,7 @@ def test_table_and_csv_render_rows_by_strategy_group_order():
         strategy_metrics=pd.DataFrame(
             [
                 {"strategy": "EP", "mode": "Working"},
-                {"strategy": "5% BO", "mode": "Working"},
+                {"strategy": "4% BO", "mode": "Working"},
                 {"strategy": "BO", "mode": "Working"},
             ]
         ),
@@ -619,7 +619,7 @@ def test_table_and_csv_render_rows_by_strategy_group_order():
     csv_output = render_csv(result)
 
     table_lines = table.splitlines()
-    assert table_lines.index("EP") < table_lines.index("5% BO") < table_lines.index("BO")
+    assert table_lines.index("EP") < table_lines.index("4% BO") < table_lines.index("BO")
     assert table.index("EPA") < table.index("EPZ") < table.index("FIVE") < table.index("BOA")
     csv_lines = csv_output.splitlines()
     assert [line.split(",")[0] for line in csv_lines[1:]] == ["EPA", "EPZ", "FIVE", "BOA"]

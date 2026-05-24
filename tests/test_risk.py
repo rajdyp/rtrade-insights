@@ -29,7 +29,7 @@ def test_strategy_mode_for_selection_reads_existing_strategy_metrics_mode_column
 def test_strategy_mode_for_selection_uses_unknown_for_missing_strategy_row():
     strategy_metrics = pd.DataFrame([{"strategy": "EP", "mode": "Working"}])
 
-    assert strategy_mode_for_selection(strategy_metrics, "5% BO") == "Unknown"
+    assert strategy_mode_for_selection(strategy_metrics, "4% BO") == "Unknown"
 
 
 def test_strategy_mode_for_selection_uses_unknown_for_unrecognized_mode():

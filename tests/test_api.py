@@ -41,7 +41,7 @@ def test_rank_endpoint_returns_json():
     payload = json.loads(response.body.decode("utf-8"))
     assert "rows" not in payload
     assert payload["groups"]["EP"][0]["symbol"] == "TEST"
-    assert payload["groups"]["5% BO"] == []
+    assert payload["groups"]["4% BO"] == []
     assert payload["groups"]["BO"] == []
 
 

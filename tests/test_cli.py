@@ -54,7 +54,7 @@ def test_rank_file_supports_json_output(tmp_path, capsys, monkeypatch):
     assert exit_code == 0
     assert "rows" not in payload
     assert payload["groups"]["EP"][0]["symbol"] == "TEST"
-    assert payload["groups"]["5% BO"] == []
+    assert payload["groups"]["4% BO"] == []
     assert payload["groups"]["BO"] == []
 
 
