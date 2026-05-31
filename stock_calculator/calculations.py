@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -52,6 +53,64 @@ PUBLIC_OUTPUT_COLUMNS = [
     "portfolio_amount",
 ]
 
+POSITION_CAMPAIGN_COLUMNS = [
+    "symbol",
+    "lots",
+    "current_shares",
+    "avg_entry",
+    "campaign_stop",
+    "sell_lot",
+    "position_size",
+    "risk_at_campaign_stop",
+    "planned_lot_risk",
+    "strategy",
+    "source",
+]
+
+CAMPAIGN_OVERRIDE_COLUMNS = [
+    "symbol",
+    "current_shares",
+    "campaign_stop",
+]
+
+CAMPAIGN_VIEW_COLUMNS = [
+    "symbol",
+    "lots",
+    "current_shares",
+    "avg_entry",
+    "campaign_stop",
+    "sell_lot",
+    "position_size",
+    "risk_at_campaign_stop",
+    "planned_lot_risk",
+    "strategy",
+    "source",
+]
+
+CAMPAIGN_TRIM_COLUMNS = [
+    "live_price",
+    "trim_count",
+    "free_roll",
+    "add_on_shares",
+    "add_on_stop",
+    "add_on_stop_percent",
+]
+
+CAMPAIGN_TRIM_VIEW_COLUMNS = [
+    "symbol",
+    "lots",
+    "current_shares",
+    "avg_entry",
+    "campaign_stop",
+    "sell_lot",
+    "position_size",
+    "risk_at_campaign_stop",
+    "planned_lot_risk",
+    *CAMPAIGN_TRIM_COLUMNS,
+]
+
+DISPLAY_PLACEHOLDER = "-"
+
 
 @dataclass(frozen=True)
 class PositionCalculation:
@@ -63,6 +122,21 @@ class PositionCalculation:
     sell_lot: int | None
     position_size: float | None
     validation_error: str
+
+
+@dataclass(frozen=True)
+class RiskNeutralAddOn:
+    symbol: str
+    source: str
+    current_shares: int | float
+    avg_entry: float
+    draft_shares: int
+    combined_shares: int | float
+    combined_avg_entry: float
+    combined_risk_at_stop: float
+    max_risk_neutral_shares: int
+    max_risk_neutral_risk_percent: float | None
+    risk_neutral: bool
 
 
 def empty_positions(rows: int = 8) -> pd.DataFrame:
@@ -258,6 +332,536 @@ def calculate_positions(df: pd.DataFrame, *, as_of: date | None = None) -> pd.Da
         result[field] = [getattr(calculation, field) for calculation in calculations]
 
     return result[OUTPUT_COLUMNS]
+
+
+def risk_neutral_add_on(
+    *,
+    symbol: str,
+    draft: pd.Series,
+    open_lots: pd.DataFrame | None = None,
+    positions: pd.DataFrame | None = None,
+) -> RiskNeutralAddOn | None:
+    normalized_symbol = str(symbol or "").upper().strip()
+    if not normalized_symbol:
+        return None
+
+    draft_price = _to_float(draft.get("share_price"))
+    draft_stop = _to_float(draft.get("stop_price"))
+    draft_shares_value = _to_float(draft.get("number_of_shares"))
+    portfolio_amount = _to_float(draft.get("portfolio_amount"))
+    if (
+        draft_price is None
+        or draft_stop is None
+        or draft_shares_value is None
+        or draft_shares_value <= 0
+        or draft_stop >= draft_price
+    ):
+        return None
+
+    existing_lots, source = _risk_neutral_existing_lots(normalized_symbol, open_lots, positions)
+    if existing_lots.empty:
+        return None
+
+    current_shares = float(existing_lots["quantity"].sum())
+    avg_entry = _weighted_average(existing_lots, "quantity", "buy_price")
+    if current_shares <= 0 or avg_entry is None:
+        return None
+
+    draft_shares = int(draft_shares_value)
+    risk_per_new_share = draft_price - draft_stop
+    existing_risk_at_stop = (avg_entry - draft_stop) * current_shares
+    max_safe_shares = int(max(0, (-existing_risk_at_stop) // risk_per_new_share))
+    combined_shares = current_shares + draft_shares
+    combined_avg_entry = ((avg_entry * current_shares) + (draft_price * draft_shares)) / combined_shares
+    combined_risk_at_stop = round((combined_avg_entry - draft_stop) * combined_shares, 2)
+    max_safe_risk_percent = (
+        round(((max_safe_shares * risk_per_new_share) / portfolio_amount) * 100, 2)
+        if portfolio_amount is not None and portfolio_amount > 0
+        else None
+    )
+
+    return RiskNeutralAddOn(
+        symbol=normalized_symbol,
+        source=source,
+        current_shares=_whole_number_if_possible(current_shares),
+        avg_entry=round(avg_entry, 2),
+        draft_shares=draft_shares,
+        combined_shares=_whole_number_if_possible(combined_shares),
+        combined_avg_entry=round(combined_avg_entry, 2),
+        combined_risk_at_stop=combined_risk_at_stop,
+        max_risk_neutral_shares=max_safe_shares,
+        max_risk_neutral_risk_percent=max_safe_risk_percent,
+        risk_neutral=combined_risk_at_stop <= 0,
+    )
+
+
+def risk_neutral_add_on_message(add_on: RiskNeutralAddOn | None) -> tuple[str, str] | None:
+    if add_on is None:
+        return None
+
+    if add_on.risk_neutral:
+        return (
+            f"Risk-neutral: Yes. Max size {add_on.max_risk_neutral_shares}; draft {add_on.draft_shares}.",
+            "ready",
+        )
+
+    cap_text = (
+        f" (cap {format_percent(add_on.max_risk_neutral_risk_percent)})"
+        if add_on.max_risk_neutral_risk_percent is not None
+        else ""
+    )
+    return (
+        f"Risk-neutral: No. Max size {add_on.max_risk_neutral_shares}{cap_text}; draft {add_on.draft_shares}.",
+        "idle",
+    )
+
+
+def _risk_neutral_existing_lots(
+    symbol: str,
+    open_lots: pd.DataFrame | None,
+    positions: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, str]:
+    robinhood_lots = _campaign_lots_from_robinhood(open_lots)
+    robinhood_matches = robinhood_lots[robinhood_lots["symbol"] == symbol]
+    if not robinhood_matches.empty:
+        return robinhood_matches, "Robinhood"
+
+    position_lots = _campaign_lots_from_positions(positions)
+    position_matches = position_lots[position_lots["symbol"] == symbol]
+    if not position_matches.empty:
+        return position_matches, "Positions"
+
+    return pd.DataFrame(), ""
+
+
+def normalize_position_campaigns(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    for column in POSITION_CAMPAIGN_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
+
+    normalized = normalized[POSITION_CAMPAIGN_COLUMNS]
+    normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
+    for column in [
+        "lots",
+        "current_shares",
+        "avg_entry",
+        "campaign_stop",
+        "sell_lot",
+        "position_size",
+        "risk_at_campaign_stop",
+        "planned_lot_risk",
+    ]:
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+    normalized["strategy"] = normalized["strategy"].fillna("").astype(str).str.strip()
+    normalized["source"] = normalized["source"].fillna("").astype(str).str.strip()
+    return normalized[normalized["symbol"] != ""].reset_index(drop=True)
+
+
+def normalize_campaign_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    for column in CAMPAIGN_OVERRIDE_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
+
+    normalized = normalized[CAMPAIGN_OVERRIDE_COLUMNS]
+    normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
+    for column in ["current_shares", "campaign_stop"]:
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+    normalized = normalized[
+        (normalized["symbol"] != "")
+        & (normalized[["current_shares", "campaign_stop"]].notna().any(axis=1))
+    ]
+    normalized = normalized.drop_duplicates(subset=["symbol"], keep="first")
+    return normalized.reset_index(drop=True)
+
+
+def campaign_view_positions(open_lots: pd.DataFrame, positions: pd.DataFrame | None = None) -> pd.DataFrame:
+    robinhood_lots = _campaign_lots_from_robinhood(open_lots)
+    position_lots = _campaign_lots_from_positions(positions)
+    symbols = sorted(set(robinhood_lots["symbol"]) | set(position_lots["symbol"]))
+    rows: list[dict[str, object]] = []
+
+    for symbol in symbols:
+        robinhood_group = robinhood_lots[robinhood_lots["symbol"] == symbol]
+        position_group = position_lots[position_lots["symbol"] == symbol]
+        if not robinhood_group.empty:
+            rows.append(_campaign_snapshot_row(symbol, robinhood_group, position_group, source="Robinhood"))
+            continue
+
+        rows.append(_campaign_snapshot_row(symbol, position_group, pd.DataFrame(), source="Positions"))
+
+    return normalize_position_campaigns(pd.DataFrame(rows, columns=CAMPAIGN_VIEW_COLUMNS))
+
+
+def _campaign_lots_from_robinhood(open_lots: pd.DataFrame | None) -> pd.DataFrame:
+    columns = ["symbol", "buy_date", "quantity", "buy_price", "planned_stop", "strategy", "risk_amount", "row_order"]
+    if open_lots is None or open_lots.empty:
+        return pd.DataFrame(columns=columns)
+
+    source = open_lots.copy()
+    for column in ["symbol", "buy_date", "quantity", "buy_price", "planned_stop", "strategy"]:
+        if column not in source.columns:
+            source[column] = None
+
+    source["symbol"] = source["symbol"].fillna("").astype(str).str.upper().str.strip()
+    source["quantity"] = pd.to_numeric(source["quantity"], errors="coerce")
+    source["buy_price"] = pd.to_numeric(source["buy_price"], errors="coerce")
+    source["planned_stop"] = pd.to_numeric(source["planned_stop"], errors="coerce")
+    source["risk_amount"] = None
+    source["row_order"] = range(len(source))
+    source = source[(source["symbol"] != "") & (source["quantity"] > 0) & (source["buy_price"] > 0)]
+    return source[columns].reset_index(drop=True)
+
+
+def _campaign_lots_from_positions(positions: pd.DataFrame | None) -> pd.DataFrame:
+    columns = ["symbol", "buy_date", "quantity", "buy_price", "planned_stop", "strategy", "risk_amount", "row_order"]
+    if positions is None or positions.empty:
+        return pd.DataFrame(columns=columns)
+
+    source = positions.copy()
+    for column in ["symbol", "buy_date", "number_of_shares", "share_price", "stop_price", "strategy", "risk_amount"]:
+        if column not in source.columns:
+            source[column] = None
+
+    lots = pd.DataFrame(
+        {
+            "symbol": source["symbol"].fillna("").astype(str).str.upper().str.strip(),
+            "buy_date": source["buy_date"],
+            "quantity": pd.to_numeric(source["number_of_shares"], errors="coerce"),
+            "buy_price": pd.to_numeric(source["share_price"], errors="coerce"),
+            "planned_stop": pd.to_numeric(source["stop_price"], errors="coerce"),
+            "strategy": source["strategy"].fillna("").astype(str).str.strip(),
+            "risk_amount": pd.to_numeric(source["risk_amount"], errors="coerce"),
+            "row_order": range(len(source)),
+        }
+    )
+    lots = lots[(lots["symbol"] != "") & (lots["quantity"] > 0) & (lots["buy_price"] > 0)]
+    return lots[columns].reset_index(drop=True)
+
+
+def _campaign_snapshot_row(
+    symbol: str,
+    lots: pd.DataFrame,
+    fallback_lots: pd.DataFrame,
+    *,
+    source: str,
+) -> dict[str, object]:
+    current_shares = float(lots["quantity"].sum())
+    avg_entry = _weighted_average(lots, "quantity", "buy_price")
+    fallback_used = False
+
+    campaign_stop = _newest_lot_value(lots, "planned_stop")
+    if campaign_stop is None and not fallback_lots.empty:
+        campaign_stop = _newest_lot_value(fallback_lots, "planned_stop")
+        fallback_used = campaign_stop is not None
+
+    strategy = _campaign_strategy_label(lots.get("strategy"))
+    if not strategy and not fallback_lots.empty:
+        strategy = _campaign_strategy_label(fallback_lots.get("strategy"))
+        fallback_used = bool(strategy)
+
+    planned_lot_risk = _planned_position_risk(lots) if source == "Positions" else _remaining_lot_risk(lots)
+    if planned_lot_risk is None and source == "Robinhood":
+        planned_lot_risk = _planned_position_risk(fallback_lots)
+        fallback_used = planned_lot_risk is not None and source == "Robinhood"
+
+    display_source = "Hybrid" if source == "Robinhood" and fallback_used else source
+    risk_at_campaign_stop = _risk_at_campaign_stop(avg_entry, campaign_stop, current_shares)
+
+    return {
+        "symbol": symbol,
+        "lots": int(len(lots)),
+        "current_shares": _whole_number_if_possible(current_shares),
+        "avg_entry": round(avg_entry, 2) if avg_entry is not None else None,
+        "campaign_stop": campaign_stop,
+        "sell_lot": max(1, int(current_shares // 3)) if current_shares > 0 else 0,
+        "position_size": round(current_shares * avg_entry, 2) if avg_entry is not None else None,
+        "risk_at_campaign_stop": risk_at_campaign_stop,
+        "planned_lot_risk": planned_lot_risk,
+        "strategy": strategy,
+        "source": display_source,
+    }
+
+
+def _weighted_average(lots: pd.DataFrame, weight_column: str, value_column: str) -> float | None:
+    weights = pd.to_numeric(lots[weight_column], errors="coerce")
+    values = pd.to_numeric(lots[value_column], errors="coerce")
+    valid = weights.notna() & values.notna() & (weights > 0)
+    if not valid.any():
+        return None
+    total_weight = float(weights[valid].sum())
+    if total_weight <= 0:
+        return None
+    return float((weights[valid] * values[valid]).sum()) / total_weight
+
+
+def _newest_lot_value(lots: pd.DataFrame, column: str) -> float | None:
+    if lots.empty or column not in lots.columns:
+        return None
+    ordered = lots.copy()
+    ordered["buy_date_sort"] = pd.to_datetime(ordered["buy_date"], errors="coerce")
+    ordered = ordered.sort_values(["buy_date_sort", "row_order"], ascending=[False, True], na_position="last")
+    for _, lot in ordered.iterrows():
+        value = _to_float(lot.get(column))
+        if value is not None:
+            return value
+    return None
+
+
+def _remaining_lot_risk(lots: pd.DataFrame) -> float | None:
+    if lots.empty:
+        return None
+    required = ["quantity", "buy_price", "planned_stop"]
+    if any(column not in lots.columns for column in required):
+        return None
+    values = lots[required].apply(pd.to_numeric, errors="coerce")
+    if values.isna().any().any():
+        return None
+    return round(float(((values["buy_price"] - values["planned_stop"]) * values["quantity"]).sum()), 2)
+
+
+def _risk_at_campaign_stop(avg_entry: float | None, campaign_stop: float | None, current_shares: float | None) -> float | None:
+    if avg_entry is None or campaign_stop is None or current_shares is None:
+        return None
+    return max(0.0, round((avg_entry - campaign_stop) * current_shares, 2))
+
+
+def _planned_position_risk(lots: pd.DataFrame) -> float | None:
+    if lots.empty or "risk_amount" not in lots.columns:
+        return None
+    risk = pd.to_numeric(lots["risk_amount"], errors="coerce")
+    if risk.notna().any():
+        return round(float(risk.fillna(0).sum()), 2)
+    return None
+
+
+def campaign_view_from_saved(campaigns: pd.DataFrame) -> pd.DataFrame:
+    columns = CAMPAIGN_VIEW_COLUMNS
+    if campaigns.empty:
+        return pd.DataFrame(columns=columns)
+    return normalize_position_campaigns(campaigns)[columns]
+
+
+def recalculate_position_campaigns(campaigns: pd.DataFrame) -> pd.DataFrame:
+    recalculated = normalize_position_campaigns(campaigns)
+    if recalculated.empty:
+        return recalculated
+
+    for index, row in recalculated.iterrows():
+        current_shares = _to_float(row.get("current_shares"))
+        avg_entry = _to_float(row.get("avg_entry"))
+        campaign_stop = _to_float(row.get("campaign_stop"))
+        if current_shares is None or current_shares < 0:
+            continue
+
+        recalculated.loc[index, "sell_lot"] = max(1, int(current_shares // 3)) if current_shares > 0 else 0
+        if avg_entry is not None:
+            recalculated.loc[index, "position_size"] = round(current_shares * avg_entry, 2)
+        recalculated.loc[index, "risk_at_campaign_stop"] = _risk_at_campaign_stop(
+            avg_entry,
+            campaign_stop,
+            current_shares,
+        )
+
+    return normalize_position_campaigns(recalculated)
+
+
+def apply_campaign_overrides(campaigns: pd.DataFrame, overrides: pd.DataFrame | None) -> pd.DataFrame:
+    current = normalize_position_campaigns(campaigns)
+    if current.empty or overrides is None or overrides.empty:
+        return current
+
+    normalized_overrides = normalize_campaign_overrides(overrides)
+    overrides_by_symbol = {
+        str(row["symbol"]): row
+        for _, row in normalized_overrides.iterrows()
+    }
+    if not overrides_by_symbol:
+        return current
+
+    updated = current.copy()
+    for index, row in updated.iterrows():
+        symbol = str(row.get("symbol") or "").upper().strip()
+        override = overrides_by_symbol.get(symbol)
+        if override is None:
+            continue
+        if pd.notna(override.get("current_shares")):
+            updated.loc[index, "current_shares"] = override.get("current_shares")
+        if pd.notna(override.get("campaign_stop")):
+            updated.loc[index, "campaign_stop"] = override.get("campaign_stop")
+    return recalculate_position_campaigns(updated)
+
+
+def campaign_trim_view(
+    campaigns: pd.DataFrame,
+    live_prices: dict[str, float] | None = None,
+    campaign_trim_credits: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    frame = campaign_view_from_saved(campaigns)
+    for column in CAMPAIGN_TRIM_COLUMNS:
+        frame[column] = None
+
+    prices = {
+        str(symbol or "").upper().strip(): _to_float(price)
+        for symbol, price in (live_prices or {}).items()
+    }
+    trim_credits = _campaign_trim_credit_by_symbol(campaign_trim_credits)
+    for index, row in frame.iterrows():
+        symbol = str(row.get("symbol") or "").upper().strip()
+        live_price = prices.get(symbol)
+        trim_count, free_roll = calculate_trim_to_free_roll(row, live_price, trim_credits.get(symbol, 0.0))
+        add_on_shares, add_on_stop = calculate_campaign_add_on(row, live_price)
+        frame.loc[index, "live_price"] = format_currency(live_price) or DISPLAY_PLACEHOLDER
+        frame.loc[index, "trim_count"] = _format_display_count(trim_count)
+        frame.loc[index, "free_roll"] = "Yes" if free_roll else "No"
+        frame.loc[index, "add_on_shares"] = _format_display_count(add_on_shares)
+        frame.loc[index, "add_on_stop"] = _format_add_on_stop(add_on_shares, add_on_stop)
+        frame.loc[index, "add_on_stop_percent"] = _format_add_on_stop_percent(
+            add_on_shares,
+            add_on_stop,
+            live_price,
+        )
+
+    return frame[CAMPAIGN_TRIM_VIEW_COLUMNS]
+
+
+def campaign_overrides_from_editor(base_campaigns: pd.DataFrame, edited_campaigns: pd.DataFrame) -> pd.DataFrame:
+    if base_campaigns.empty or edited_campaigns.empty:
+        return normalize_campaign_overrides(pd.DataFrame(columns=CAMPAIGN_OVERRIDE_COLUMNS))
+
+    base = normalize_position_campaigns(base_campaigns)
+    edited = normalize_campaign_overrides(edited_campaigns)
+    base_shares = {
+        str(row["symbol"]): _to_float(row["current_shares"])
+        for _, row in base.iterrows()
+    }
+    base_stops = {
+        str(row["symbol"]): _to_float(row["campaign_stop"])
+        for _, row in base.iterrows()
+    }
+
+    rows: list[dict[str, object]] = []
+    for _, row in edited.iterrows():
+        symbol = str(row["symbol"])
+        edited_shares = _to_float(row["current_shares"])
+        original_shares = base_shares.get(symbol)
+        edited_stop = _to_float(row.get("campaign_stop"))
+        original_stop = base_stops.get(symbol)
+        override: dict[str, object] = {"symbol": symbol}
+
+        if edited_shares is not None and original_shares is not None and not math.isclose(
+            edited_shares, original_shares, rel_tol=0, abs_tol=1e-9
+        ):
+            override["current_shares"] = edited_shares
+        if edited_stop is not None and original_stop is not None and not math.isclose(
+            edited_stop, original_stop, rel_tol=0, abs_tol=1e-9
+        ):
+            override["campaign_stop"] = edited_stop
+
+        if len(override) > 1:
+            rows.append(override)
+
+    return normalize_campaign_overrides(pd.DataFrame(rows, columns=CAMPAIGN_OVERRIDE_COLUMNS))
+
+
+def calculate_trim_to_free_roll(row: pd.Series, live_price: Any, realized_trim_credit: Any = 0) -> tuple[int | None, bool]:
+    current_shares = _to_float(row.get("current_shares"))
+    avg_entry = _to_float(row.get("avg_entry"))
+    campaign_stop = _to_float(row.get("campaign_stop"))
+    live_price = _to_float(live_price)
+    realized_trim_credit = _to_float(realized_trim_credit) or 0.0
+
+    if current_shares is None or avg_entry is None or campaign_stop is None or current_shares <= 0:
+        return None, False
+
+    loss_if_stopped = current_shares * (avg_entry - campaign_stop)
+    effective_loss_if_stopped = max(0.0, loss_if_stopped - realized_trim_credit)
+    if effective_loss_if_stopped <= 0:
+        return 0, True
+
+    if live_price is None or live_price <= campaign_stop:
+        return None, False
+
+    trim_count = math.ceil(effective_loss_if_stopped / (live_price - campaign_stop))
+    trim_count = max(0, min(trim_count, math.ceil(current_shares)))
+    return trim_count, False
+
+
+def _campaign_trim_credit_by_symbol(campaign_trim_credits: pd.DataFrame | None) -> dict[str, float]:
+    if campaign_trim_credits is None or campaign_trim_credits.empty:
+        return {}
+
+    credits = campaign_trim_credits.copy()
+    if "symbol" not in credits.columns or "realized_trim_credit" not in credits.columns:
+        return {}
+
+    credits["symbol"] = credits["symbol"].fillna("").astype(str).str.upper().str.strip()
+    credits["realized_trim_credit"] = pd.to_numeric(credits["realized_trim_credit"], errors="coerce")
+    credits = credits[(credits["symbol"] != "") & credits["realized_trim_credit"].notna()]
+    return {
+        str(row["symbol"]): float(row["realized_trim_credit"])
+        for _, row in credits.iterrows()
+    }
+
+
+def calculate_campaign_add_on(row: pd.Series, live_price: Any) -> tuple[int | None, float | None]:
+    current_shares = _to_float(row.get("current_shares"))
+    avg_entry = _to_float(row.get("avg_entry"))
+    live_price = _to_float(live_price)
+
+    if current_shares is None or avg_entry is None or current_shares <= 0:
+        return None, None
+
+    if live_price is None:
+        return None, None
+
+    add_on_shares = math.floor(current_shares * 0.50)
+    if live_price <= avg_entry or add_on_shares <= 0:
+        return 0, None
+
+    combined_shares = current_shares + add_on_shares
+    add_on_stop = ((avg_entry * current_shares) + (live_price * add_on_shares)) / combined_shares
+    return add_on_shares, round(add_on_stop, 2)
+
+
+def _format_add_on_stop(add_on_shares: int | None, add_on_stop: float | None) -> str | None:
+    if add_on_shares == 0:
+        return "N/A"
+    return format_currency(add_on_stop) or DISPLAY_PLACEHOLDER
+
+
+def _format_add_on_stop_percent(
+    add_on_shares: int | None,
+    add_on_stop: float | None,
+    live_price: Any,
+) -> str | None:
+    live_price = _to_float(live_price)
+    if add_on_shares == 0:
+        return "N/A"
+    if add_on_stop is None or live_price is None or live_price <= 0:
+        return DISPLAY_PLACEHOLDER
+    return format_percent(((live_price - add_on_stop) / live_price) * 100)
+
+
+def _format_display_count(value: int | None) -> int | str:
+    return DISPLAY_PLACEHOLDER if value is None else value
+
+
+def _campaign_strategy_label(strategies: pd.Series | None) -> str:
+    if strategies is None:
+        return ""
+    unique = [str(strategy or "").strip() for strategy in strategies if str(strategy or "").strip()]
+    distinct = sorted(set(unique))
+    if len(distinct) == 1:
+        return distinct[0]
+    if len(distinct) > 1:
+        return "Mixed"
+    return ""
+
+
+def _whole_number_if_possible(value: float) -> int | float:
+    return int(value) if float(value).is_integer() else round(value, 8)
 
 
 def _new_position_id(

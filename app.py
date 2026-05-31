@@ -7,10 +7,15 @@ import pandas as pd
 import streamlit as st
 
 from stock_calculator.calculations import (
+    CAMPAIGN_TRIM_VIEW_COLUMNS,
     INPUT_COLUMNS,
     POSITION_ID_COLUMN,
     PUBLIC_OUTPUT_COLUMNS,
     append_committed_position,
+    apply_campaign_overrides,
+    campaign_overrides_from_editor,
+    campaign_trim_view,
+    campaign_view_positions,
     calculate_positions,
     committed_positions,
     delete_positions_by_index,
@@ -19,8 +24,11 @@ from stock_calculator.calculations import (
     format_percent,
     percent_of_portfolio,
     prospective_symbol_exposure_breach,
+    risk_neutral_add_on,
+    risk_neutral_add_on_message,
     symbol_exposure_breaches,
 )
+from stock_calculator.alpaca import AlpacaMarketDataClient
 from stock_calculator.config import load_config
 from stock_calculator.robinhood import (
     STRATEGY_OPTIONS,
@@ -60,12 +68,14 @@ from stock_calculator.storage import (
     StorageError,
     append_robinhood_transactions,
     get_storage_backend,
+    load_campaign_overrides,
     load_planned_stops,
     load_positions,
     load_positions_archive,
     load_robinhood_transactions,
     planned_stops_label,
     robinhood_transactions_label,
+    save_campaign_overrides,
     save_planned_stops,
     save_positions,
     save_positions_archive,
@@ -97,6 +107,8 @@ POSITION_EDITOR_COLUMNS = [
     "portfolio_amount",
 ]
 EDITABLE_POSITION_COLUMNS = [*INPUT_COLUMNS, "strategy"]
+EDITABLE_CAMPAIGN_VIEW_COLUMNS = ["current_shares", "campaign_stop"]
+CAMPAIGN_PRICE_FEED = "iex"
 POSITIONS_TABLE_MIN_VISIBLE_ROWS = 5
 ROBINHOOD_TABLE_HEADER_HEIGHT = 36
 ROBINHOOD_TABLE_ROW_HEIGHT = 35
@@ -575,6 +587,28 @@ def positions_column_config() -> dict:
     }
 
 
+def campaign_view_column_config() -> dict:
+    return {
+        "symbol": st.column_config.TextColumn("Symbol", width=72),
+        "lots": st.column_config.NumberColumn("Lots", width=56),
+        "current_shares": st.column_config.NumberColumn("Open Shares", min_value=0, step=1, width=112),
+        "avg_entry": st.column_config.NumberColumn("Avg Entry", format="$%.2f", width=84),
+        "campaign_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=110),
+        "sell_lot": st.column_config.NumberColumn("Sell Lot", width=72),
+        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=104),
+        "risk_at_campaign_stop": st.column_config.NumberColumn("Risk at Stop", format="$%.2f", width=104),
+        "planned_lot_risk": st.column_config.NumberColumn("Planned Risk", format="$%.2f", width=104),
+        "live_price": st.column_config.TextColumn("Live Price", width=92),
+        "trim_count": st.column_config.TextColumn("Trim Count", width=82),
+        "free_roll": st.column_config.TextColumn("Free Roll", width=82),
+        "add_on_shares": st.column_config.TextColumn("Add Shares", width=92),
+        "add_on_stop": st.column_config.TextColumn("Add Stop", width=88),
+        "add_on_stop_percent": st.column_config.TextColumn("Add Stop %", width=92),
+        "strategy": st.column_config.TextColumn("Strategy", width=82),
+        "source": st.column_config.TextColumn("Source", width=86),
+    }
+
+
 def closed_trades_column_config() -> dict:
     return {
         "symbol": st.column_config.TextColumn("Symbol", width=68),
@@ -622,6 +656,39 @@ def positions_editor_frame(positions: pd.DataFrame, planned_stops: pd.DataFrame)
     frame = positions.copy()
     frame["strategy"] = [planned_strategy(row, planned_stops) for _, row in frame.iterrows()]
     return editor_frame(frame[POSITION_EDITOR_COLUMNS])
+
+
+def campaign_view_source_frame(positions: pd.DataFrame, planned_stops: pd.DataFrame) -> pd.DataFrame:
+    frame = positions.copy()
+    frame["strategy"] = [planned_strategy(row, planned_stops) for _, row in frame.iterrows()]
+    return frame
+
+
+def campaign_view_editor_frame(campaign_view: pd.DataFrame, campaign_trim_credits: pd.DataFrame) -> pd.DataFrame:
+    return campaign_trim_view(campaign_view, st.session_state.get("campaign_live_prices", {}), campaign_trim_credits)
+
+
+def refresh_campaign_live_prices(campaign_view: pd.DataFrame) -> tuple[str, str]:
+    symbols = [
+        str(symbol or "").upper().strip()
+        for symbol in campaign_view.get("symbol", pd.Series(dtype=object)).tolist()
+        if str(symbol or "").strip()
+    ]
+    if not symbols:
+        st.session_state.campaign_live_prices = {}
+        return "No campaign symbols are available for Alpaca refresh.", "idle"
+
+    data = AlpacaMarketDataClient.from_env().get_market_data(symbols, feed=CAMPAIGN_PRICE_FEED)
+    prices = {
+        symbol: row.price
+        for symbol, row in data.items()
+        if row.price is not None
+    }
+    st.session_state.campaign_live_prices = prices
+    missing_count = len(set(symbols) - set(prices))
+    if missing_count:
+        return f"Updated Alpaca prices for {len(prices)} symbol(s); {missing_count} missing.", "warning"
+    return f"Updated Alpaca prices for {len(prices)} symbol(s).", "ready"
 
 
 def planned_strategy(row: pd.Series, planned_stops: pd.DataFrame) -> str:
@@ -1087,6 +1154,8 @@ if "positions" not in st.session_state:
     st.session_state.positions = load_positions()
 if "positions_archive" not in st.session_state:
     st.session_state.positions_archive = load_positions_archive()
+if "campaign_overrides" not in st.session_state:
+    st.session_state.campaign_overrides = load_campaign_overrides()
 if "planned_stops" not in st.session_state:
     st.session_state.planned_stops = load_planned_stops()
 if "robinhood_transactions" not in st.session_state:
@@ -1113,6 +1182,10 @@ if "draft_risk_context" not in st.session_state:
     st.session_state.draft_risk_context = None
 if "position_editor_revision" not in st.session_state:
     st.session_state.position_editor_revision = 0
+if "campaign_live_prices" not in st.session_state:
+    st.session_state.campaign_live_prices = {}
+if "campaign_price_feedback" not in st.session_state:
+    st.session_state.campaign_price_feedback = None
 
 apply_styles()
 
@@ -1209,6 +1282,17 @@ draft_exposure_breach = (
     if draft_is_valid
     else None
 )
+risk_neutral_add_on_result = (
+    risk_neutral_add_on(
+        symbol=symbol,
+        draft=draft_row,
+        open_lots=robinhood_derivation.open_lots,
+        positions=campaign_view_source_frame(visible_calculated, st.session_state.planned_stops),
+    )
+    if draft_is_valid
+    else None
+)
+risk_neutral_message = risk_neutral_add_on_message(risk_neutral_add_on_result)
 
 preview_cols = st.columns(5)
 preview_cols[0].metric("Stop Loss", format_percent(first_value(draft_result, "stop_loss_percent")))
@@ -1238,6 +1322,8 @@ else:
 action_cols = st.columns([1.5, 1, 1.5])
 with action_cols[0]:
     render_feedback(feedback_message, feedback_status)
+    if risk_neutral_message is not None:
+        render_feedback(risk_neutral_message[0], risk_neutral_message[1])
 with action_cols[1]:
     st.button("Add Position", disabled=not draft_is_valid, on_click=add_current_draft, width="stretch")
 
@@ -1315,6 +1401,35 @@ else:
     save_planned_stops(st.session_state.planned_stops)
     archive_positions_snapshot(visible_calculated, strategy_values)
     invalid_positions = int((visible_calculated["validation_error"].fillna("") != "").sum())
+
+campaign_source_positions = campaign_view_source_frame(visible_calculated, st.session_state.planned_stops)
+derived_campaign_view = campaign_view_positions(robinhood_derivation.open_lots, campaign_source_positions)
+campaign_view = apply_campaign_overrides(derived_campaign_view, st.session_state.campaign_overrides)
+if not campaign_view.empty:
+    with st.expander("Campaign View", expanded=False):
+        campaign_action_cols = st.columns([1, 3])
+        with campaign_action_cols[0]:
+            if st.button("Refresh Alpaca Prices", width="stretch"):
+                try:
+                    st.session_state.campaign_price_feedback = refresh_campaign_live_prices(campaign_view)
+                except ValueError as exc:
+                    st.session_state.campaign_price_feedback = (str(exc), "error")
+        if st.session_state.campaign_price_feedback is not None:
+            render_feedback(st.session_state.campaign_price_feedback[0], st.session_state.campaign_price_feedback[1])
+
+        edited_campaigns = st.data_editor(
+            campaign_view_editor_frame(campaign_view, robinhood_derivation.campaign_trim_credits),
+            column_config=campaign_view_column_config(),
+            disabled=[column for column in CAMPAIGN_TRIM_VIEW_COLUMNS if column not in EDITABLE_CAMPAIGN_VIEW_COLUMNS],
+            height=robinhood_dataframe_height(len(campaign_view)),
+            num_rows="fixed",
+            width="stretch",
+            hide_index=True,
+            key="campaign_view_editor",
+        )
+        render_feedback("Campaign View is derived primarily from Robinhood open lots.", "idle")
+        st.session_state.campaign_overrides = campaign_overrides_from_editor(derived_campaign_view, edited_campaigns)
+        save_campaign_overrides(st.session_state.campaign_overrides)
 
 if invalid_positions:
     invalid_rows = visible_calculated[visible_calculated["validation_error"].fillna("") != ""]

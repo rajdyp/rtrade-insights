@@ -7,11 +7,15 @@ from typing import Any, Mapping, Protocol
 import pandas as pd
 
 from stock_calculator.calculations import (
+    CAMPAIGN_OVERRIDE_COLUMNS,
+    POSITION_CAMPAIGN_COLUMNS,
     POSITION_ID_COLUMN,
     POSITION_SOURCE_COLUMNS,
     committed_positions,
     ensure_position_ids,
+    normalize_campaign_overrides,
     normalize_input_frame,
+    normalize_position_campaigns,
 )
 from stock_calculator.risk import normalize_market_regime
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, normalize_strategy
@@ -19,11 +23,15 @@ from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS
 
 DATA_PATH = Path("data/positions.csv")
 POSITIONS_ARCHIVE_PATH = Path("data/positions_archive.csv")
+CAMPAIGN_OVERRIDES_PATH = Path("data/campaign_overrides.csv")
+POSITION_CAMPAIGNS_PATH = Path("data/position_campaigns.csv")
 ROBINHOOD_TRANSACTIONS_PATH = Path("data/robinhood_transactions.csv")
 PLANNED_STOPS_PATH = Path("data/planned_stops.csv")
 
 POSITIONS_WORKSHEET = "positions"
 POSITIONS_ARCHIVE_WORKSHEET = "positions_archive"
+CAMPAIGN_OVERRIDES_WORKSHEET = "campaign_overrides"
+POSITION_CAMPAIGNS_WORKSHEET = "position_campaigns"
 PLANNED_STOPS_WORKSHEET = "planned_stops"
 ROBINHOOD_TRANSACTIONS_WORKSHEET = "robinhood_transactions"
 
@@ -73,6 +81,14 @@ class StorageBackend(Protocol):
 
     def save_positions_archive(self, df: pd.DataFrame) -> None: ...
 
+    def load_campaign_overrides(self) -> pd.DataFrame: ...
+
+    def save_campaign_overrides(self, df: pd.DataFrame) -> None: ...
+
+    def load_position_campaigns(self) -> pd.DataFrame: ...
+
+    def save_position_campaigns(self, df: pd.DataFrame) -> None: ...
+
     def load_planned_stops(self) -> pd.DataFrame: ...
 
     def save_planned_stops(self, df: pd.DataFrame) -> None: ...
@@ -90,6 +106,8 @@ class StorageBackend(Protocol):
 class LocalCsvStorage:
     positions_path: Path = DATA_PATH
     positions_archive_path: Path = POSITIONS_ARCHIVE_PATH
+    campaign_overrides_path: Path = CAMPAIGN_OVERRIDES_PATH
+    position_campaigns_path: Path = POSITION_CAMPAIGNS_PATH
     planned_stops_path: Path = PLANNED_STOPS_PATH
     transactions_path: Path = ROBINHOOD_TRANSACTIONS_PATH
 
@@ -108,6 +126,18 @@ class LocalCsvStorage:
 
     def save_positions_archive(self, df: pd.DataFrame) -> None:
         _save_positions_archive_csv(df, self.positions_archive_path)
+
+    def load_campaign_overrides(self) -> pd.DataFrame:
+        return _load_campaign_overrides_csv(self.campaign_overrides_path)
+
+    def save_campaign_overrides(self, df: pd.DataFrame) -> None:
+        _save_campaign_overrides_csv(df, self.campaign_overrides_path)
+
+    def load_position_campaigns(self) -> pd.DataFrame:
+        return _load_position_campaigns_csv(self.position_campaigns_path)
+
+    def save_position_campaigns(self, df: pd.DataFrame) -> None:
+        _save_position_campaigns_csv(df, self.position_campaigns_path)
 
     def load_planned_stops(self) -> pd.DataFrame:
         return _load_planned_stops_csv(self.planned_stops_path)
@@ -150,6 +180,26 @@ class GoogleSheetsStorage:
             POSITIONS_ARCHIVE_WORKSHEET,
             _normalize_positions_archive(df),
             POSITION_ARCHIVE_COLUMNS,
+        )
+
+    def load_campaign_overrides(self) -> pd.DataFrame:
+        return normalize_campaign_overrides(self._read_table(CAMPAIGN_OVERRIDES_WORKSHEET, CAMPAIGN_OVERRIDE_COLUMNS))
+
+    def save_campaign_overrides(self, df: pd.DataFrame) -> None:
+        self._write_table(
+            CAMPAIGN_OVERRIDES_WORKSHEET,
+            normalize_campaign_overrides(df),
+            CAMPAIGN_OVERRIDE_COLUMNS,
+        )
+
+    def load_position_campaigns(self) -> pd.DataFrame:
+        return normalize_position_campaigns(self._read_table(POSITION_CAMPAIGNS_WORKSHEET, POSITION_CAMPAIGN_COLUMNS))
+
+    def save_position_campaigns(self, df: pd.DataFrame) -> None:
+        self._write_table(
+            POSITION_CAMPAIGNS_WORKSHEET,
+            normalize_position_campaigns(df),
+            POSITION_CAMPAIGN_COLUMNS,
         )
 
     def load_planned_stops(self) -> pd.DataFrame:
@@ -309,6 +359,32 @@ def save_positions_archive(df: pd.DataFrame, path: Path | None = None) -> None:
     _save_positions_archive_csv(df, path)
 
 
+def load_campaign_overrides(path: Path | None = None) -> pd.DataFrame:
+    if path is None:
+        return get_storage_backend().load_campaign_overrides()
+    return _load_campaign_overrides_csv(path)
+
+
+def save_campaign_overrides(df: pd.DataFrame, path: Path | None = None) -> None:
+    if path is None:
+        get_storage_backend().save_campaign_overrides(df)
+        return
+    _save_campaign_overrides_csv(df, path)
+
+
+def load_position_campaigns(path: Path | None = None) -> pd.DataFrame:
+    if path is None:
+        return get_storage_backend().load_position_campaigns()
+    return _load_position_campaigns_csv(path)
+
+
+def save_position_campaigns(df: pd.DataFrame, path: Path | None = None) -> None:
+    if path is None:
+        get_storage_backend().save_position_campaigns(df)
+        return
+    _save_position_campaigns_csv(df, path)
+
+
 def load_planned_stops(path: Path | None = None) -> pd.DataFrame:
     if path is None:
         return get_storage_backend().load_planned_stops()
@@ -355,6 +431,28 @@ def _load_positions_archive_csv(path: Path = POSITIONS_ARCHIVE_PATH) -> pd.DataF
 def _save_positions_archive_csv(df: pd.DataFrame, path: Path = POSITIONS_ARCHIVE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _normalize_positions_archive(df).to_csv(path, index=False, columns=POSITION_ARCHIVE_COLUMNS)
+
+
+def _load_campaign_overrides_csv(path: Path = CAMPAIGN_OVERRIDES_PATH) -> pd.DataFrame:
+    if not path.exists():
+        return normalize_campaign_overrides(pd.DataFrame(columns=CAMPAIGN_OVERRIDE_COLUMNS))
+    return normalize_campaign_overrides(pd.read_csv(path))
+
+
+def _save_campaign_overrides_csv(df: pd.DataFrame, path: Path = CAMPAIGN_OVERRIDES_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalize_campaign_overrides(df).to_csv(path, index=False, columns=CAMPAIGN_OVERRIDE_COLUMNS)
+
+
+def _load_position_campaigns_csv(path: Path = POSITION_CAMPAIGNS_PATH) -> pd.DataFrame:
+    if not path.exists():
+        return normalize_position_campaigns(pd.DataFrame(columns=POSITION_CAMPAIGN_COLUMNS))
+    return normalize_position_campaigns(pd.read_csv(path))
+
+
+def _save_position_campaigns_csv(df: pd.DataFrame, path: Path = POSITION_CAMPAIGNS_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalize_position_campaigns(df).to_csv(path, index=False, columns=POSITION_CAMPAIGN_COLUMNS)
 
 
 def upsert_positions_archive(archive: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:

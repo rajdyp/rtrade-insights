@@ -15,7 +15,7 @@ Personal Streamlit dashboard and local workflow tools for trade planning, positi
 Requirements: Python 3.11+.
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m streamlit run app.py
 ```
@@ -46,6 +46,7 @@ By default, the app stores local runtime data under `data/`:
 
 - `positions.csv`: editable active-position source data.
 - `positions_archive.csv`: permanent latest-snapshot archive of every position added through the app.
+- `campaign_overrides.csv`: manual Campaign View `Current Shares` and `Campaign Stop` overrides by symbol.
 - `planned_stops.csv`: durable entry stop, strategy, ATR %, and market-regime context.
 - `robinhood_transactions.csv`: cleaned imported Robinhood transactions with duplicate uploads skipped.
 
@@ -62,6 +63,7 @@ Required worksheet tabs are created automatically if missing:
 
 - `positions`
 - `positions_archive`
+- `campaign_overrides`
 - `planned_stops`
 - `robinhood_transactions`
 
