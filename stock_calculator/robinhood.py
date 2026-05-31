@@ -135,6 +135,7 @@ STRATEGY_ATTRIBUTION_COLUMNS = [
     "evidence",
     "playbook",
 ]
+CAMPAIGN_TRIM_CREDIT_COLUMNS = ["symbol", "realized_trim_credit"]
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,7 @@ class TradeDerivation:
     closed_trades: pd.DataFrame
     exit_matches: pd.DataFrame
     open_lots: pd.DataFrame
+    campaign_trim_credits: pd.DataFrame
     unmatched_sells: pd.DataFrame
     missing_planned_stops: int
     planned_stop_issues: pd.DataFrame
@@ -1021,6 +1023,7 @@ def derive_fifo_trades(
             _empty_closed_trades(),
             _empty_closed_trades(),
             _empty_open_lots(),
+            _empty_campaign_trim_credits(),
             _empty_unmatched_sells(),
             0,
             _empty_planned_stop_issues(),
@@ -1033,6 +1036,10 @@ def derive_fifo_trades(
     buy_lot_matches, lot_grouping_audit = _buy_lot_matches(normalized, planned_stops, planned_stop_lookup)
     lots: defaultdict[str, deque[dict[str, Any]]] = defaultdict(deque)
     trade_groups: dict[str, dict[str, Any]] = {}
+    symbol_positions: defaultdict[str, float] = defaultdict(float)
+    symbol_campaign_ids: defaultdict[str, int] = defaultdict(int)
+    active_campaign_ids: dict[str, int] = {}
+    realized_pnl_by_campaign: defaultdict[tuple[str, int], float] = defaultdict(float)
     closed_trades: list[dict[str, Any]] = []
     exit_matches: list[dict[str, Any]] = []
     unmatched_sells: list[dict[str, Any]] = []
@@ -1042,6 +1049,10 @@ def derive_fifo_trades(
         quantity = float(row["quantity"])
         if row["trans_code"] == "Buy":
             buy_date = row["activity_date"]
+            if symbol_positions[symbol] <= 1e-9:
+                symbol_campaign_ids[symbol] += 1
+                active_campaign_ids[symbol] = symbol_campaign_ids[symbol]
+            campaign_id = active_campaign_ids[symbol]
             lot_match = buy_lot_matches.get(
                 row_index,
                 {
@@ -1074,6 +1085,7 @@ def derive_fifo_trades(
                     "quantity": quantity,
                     "original_quantity": quantity,
                     "buy_price": float(row["price"]),
+                    "campaign_id": campaign_id,
                     "logical_trade_id": logical_trade_id,
                     "exit_matches": [],
                     "planned_stop": lot_match["planned_stop"],
@@ -1082,6 +1094,7 @@ def derive_fifo_trades(
                     "market_regime": lot_match["market_regime"],
                 }
             )
+            symbol_positions[symbol] += quantity
             continue
 
         remaining_quantity = quantity
@@ -1095,6 +1108,8 @@ def derive_fifo_trades(
             sell_amount = round(matched_quantity * sell_price, 2)
             realized_pnl = round(sell_amount - buy_amount, 2)
             realized_pnl_percent = round((realized_pnl / buy_amount) * 100, 2) if buy_amount else None
+            campaign_id = int(lot["campaign_id"])
+            realized_pnl_by_campaign[(symbol, campaign_id)] += realized_pnl
 
             exit_match = {
                 "symbol": symbol,
@@ -1121,6 +1136,10 @@ def derive_fifo_trades(
 
             lot["quantity"] -= matched_quantity
             remaining_quantity -= matched_quantity
+            symbol_positions[symbol] -= matched_quantity
+            if symbol_positions[symbol] <= 1e-9:
+                symbol_positions[symbol] = 0.0
+                active_campaign_ids.pop(symbol, None)
             if trade_group["remaining_quantity"] <= 1e-9 and not trade_group["closed"]:
                 closed_trades.append(_aggregate_closed_trade(trade_group))
                 trade_group["closed"] = True
@@ -1161,6 +1180,7 @@ def derive_fifo_trades(
     closed_frame = pd.DataFrame(closed_trades, columns=CLOSED_TRADE_COLUMNS)
     exit_match_frame = pd.DataFrame(exit_matches, columns=CLOSED_TRADE_COLUMNS)
     open_frame = pd.DataFrame(open_lots, columns=OPEN_LOT_COLUMNS)
+    campaign_trim_credit_frame = _campaign_trim_credit_frame(realized_pnl_by_campaign, active_campaign_ids)
     unmatched_frame = pd.DataFrame(unmatched_sells, columns=UNMATCHED_SELL_COLUMNS)
     missing_planned_stops = _missing_stop_count(closed_frame) + _missing_stop_count(open_frame)
     missing_planned_stop_rows = _missing_planned_stop_rows(closed_frame, open_frame)
@@ -1169,12 +1189,27 @@ def derive_fifo_trades(
         closed_frame,
         exit_match_frame,
         open_frame,
+        campaign_trim_credit_frame,
         unmatched_frame,
         missing_planned_stops,
         planned_stop_issues,
         missing_planned_stop_rows,
         lot_grouping_audit,
     )
+
+
+def _campaign_trim_credit_frame(
+    realized_pnl_by_campaign: dict[tuple[str, int], float],
+    active_campaign_ids: dict[str, int],
+) -> pd.DataFrame:
+    rows = [
+        {
+            "symbol": symbol,
+            "realized_trim_credit": round(realized_pnl_by_campaign.get((symbol, campaign_id), 0.0), 2),
+        }
+        for symbol, campaign_id in sorted(active_campaign_ids.items())
+    ]
+    return pd.DataFrame(rows, columns=CAMPAIGN_TRIM_CREDIT_COLUMNS)
 
 
 def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
@@ -1600,6 +1635,10 @@ def _empty_closed_trades() -> pd.DataFrame:
 
 def _empty_open_lots() -> pd.DataFrame:
     return pd.DataFrame(columns=OPEN_LOT_COLUMNS)
+
+
+def _empty_campaign_trim_credits() -> pd.DataFrame:
+    return pd.DataFrame(columns=CAMPAIGN_TRIM_CREDIT_COLUMNS)
 
 
 def _empty_unmatched_sells() -> pd.DataFrame:

@@ -3,17 +3,32 @@ from datetime import date
 import pandas as pd
 
 from stock_calculator.calculations import (
+    CAMPAIGN_OVERRIDE_COLUMNS,
+    CAMPAIGN_TRIM_VIEW_COLUMNS,
+    CAMPAIGN_VIEW_COLUMNS,
     POSITION_ID_COLUMN,
+    POSITION_CAMPAIGN_COLUMNS,
     POSITION_SOURCE_COLUMNS,
     PUBLIC_OUTPUT_COLUMNS,
+    RiskNeutralAddOn,
     append_committed_position,
+    apply_campaign_overrides,
+    campaign_overrides_from_editor,
+    campaign_trim_view,
+    campaign_view_positions,
+    calculate_campaign_add_on,
+    calculate_trim_to_free_roll,
     calculate_positions,
     committed_positions,
     delete_positions_by_index,
     draft_position,
     empty_positions,
+    normalize_campaign_overrides,
+    normalize_position_campaigns,
     percent_of_portfolio,
     prospective_symbol_exposure_breach,
+    risk_neutral_add_on,
+    risk_neutral_add_on_message,
     symbol_exposure_breaches,
     weekday_hold_count,
 )
@@ -404,6 +419,792 @@ def test_invalid_position_has_blank_sell_lot():
     )
 
     assert pd.isna(result.iloc[0]["sell_lot"])
+
+
+def test_campaign_view_uses_positions_when_robinhood_open_lots_are_missing():
+    positions = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "DNTH",
+                    "buy_date": "2026-05-29",
+                    "share_price": 91.50,
+                    "stop_price": 90.00,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 0.12,
+                },
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-26",
+                    "share_price": 36.11,
+                    "stop_price": 35.25,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 0.12,
+                },
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-29",
+                    "share_price": 47.95,
+                    "stop_price": 44.00,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 1.00,
+                },
+            ]
+        )
+    )
+    positions["strategy"] = ["BO", "4% BO", "EP"]
+
+    result = campaign_view_positions(pd.DataFrame(), positions)
+
+    assert result.columns.tolist() == CAMPAIGN_VIEW_COLUMNS
+    assert result.to_dict("records") == [
+        {
+            "symbol": "DNTH",
+            "lots": 1,
+            "current_shares": 15,
+            "avg_entry": 91.5,
+            "campaign_stop": 90.0,
+            "sell_lot": 5,
+            "position_size": 1372.5,
+            "risk_at_campaign_stop": 22.5,
+            "planned_lot_risk": 23.1,
+            "strategy": "BO",
+            "source": "Positions",
+        },
+        {
+            "symbol": "SMCI",
+            "lots": 2,
+            "current_shares": 74,
+            "avg_entry": 43.79,
+            "campaign_stop": 44.0,
+            "sell_lot": 24,
+            "position_size": 3240.46,
+            "risk_at_campaign_stop": 0.0,
+            "planned_lot_risk": 215.6,
+            "strategy": "Mixed",
+            "source": "Positions",
+        }
+    ]
+
+
+def test_campaign_view_uses_robinhood_open_lots_before_positions():
+    open_lots = pd.DataFrame(
+        [
+            {"symbol": "DNTH", "buy_date": "2026-05-29", "quantity": 15, "planned_stop": 90, "strategy": "BO", "buy_price": 91.49},
+            {
+                "symbol": "SMCI",
+                "buy_date": "2026-05-26",
+                "quantity": 18,
+                "planned_stop": 35.25,
+                "strategy": "4% BO",
+                "buy_price": 36.03,
+            },
+            {
+                "symbol": "SMCI",
+                "buy_date": "2026-05-29",
+                "quantity": 48,
+                "planned_stop": 44.00,
+                "strategy": "EP",
+                "buy_price": 48.23,
+            },
+        ]
+    )
+    positions = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-26",
+                    "share_price": 36.11,
+                    "stop_price": 35.25,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 0.12,
+                },
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-29",
+                    "share_price": 47.95,
+                    "stop_price": 44.00,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 1.00,
+                },
+            ]
+        )
+    )
+    positions["strategy"] = "EP"
+
+    result = campaign_view_positions(open_lots, positions)
+
+    assert result.to_dict("records") == [
+        {
+            "symbol": "DNTH",
+            "lots": 1,
+            "current_shares": 15,
+            "avg_entry": 91.49,
+            "campaign_stop": 90.0,
+            "sell_lot": 5,
+            "position_size": 1372.35,
+            "risk_at_campaign_stop": 22.35,
+            "planned_lot_risk": 22.35,
+            "strategy": "BO",
+            "source": "Robinhood",
+        },
+        {
+            "symbol": "SMCI",
+            "lots": 2,
+            "current_shares": 66,
+            "avg_entry": 44.9,
+            "campaign_stop": 44.0,
+            "sell_lot": 22,
+            "position_size": 2963.58,
+            "risk_at_campaign_stop": 59.58,
+            "planned_lot_risk": 217.08,
+            "strategy": "Mixed",
+            "source": "Robinhood",
+        }
+    ]
+
+
+def test_campaign_view_falls_back_to_position_context_for_missing_robinhood_metadata():
+    open_lots = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "buy_date": "2026-05-26", "quantity": 18, "buy_price": 36.03},
+            {"symbol": "SMCI", "buy_date": "2026-05-29", "quantity": 48, "buy_price": 48.23},
+        ]
+    )
+    positions = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-26",
+                    "share_price": 36.11,
+                    "stop_price": 35.25,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 0.12,
+                },
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-29",
+                    "share_price": 47.95,
+                    "stop_price": 44.00,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 1.00,
+                },
+            ]
+        )
+    )
+    positions["strategy"] = ["4% BO", "EP"]
+
+    result = campaign_view_positions(open_lots, positions)
+
+    row = result.iloc[0]
+    assert row["current_shares"] == 66
+    assert row["campaign_stop"] == 44
+    assert row["sell_lot"] == 22
+    assert row["planned_lot_risk"] == 215.6
+    assert row["strategy"] == "Mixed"
+    assert row["source"] == "Hybrid"
+
+
+def test_normalize_position_campaigns_cleans_override_rows():
+    result = normalize_position_campaigns(
+        pd.DataFrame(
+            [
+                {"symbol": " smci ", "current_shares": "60"},
+                {"symbol": "", "current_shares": "10"},
+            ]
+        )
+    )
+
+    assert result["symbol"].tolist() == ["SMCI"]
+    assert result["current_shares"].tolist() == [60]
+    assert result.columns.tolist() == POSITION_CAMPAIGN_COLUMNS
+
+
+def test_normalize_campaign_overrides_keeps_only_symbol_current_shares_and_campaign_stop():
+    result = normalize_campaign_overrides(
+        pd.DataFrame(
+            [
+                {"symbol": " smci ", "current_shares": "66", "campaign_stop": "44.90", "live_price": "55.20"},
+                {"symbol": "", "current_shares": "10"},
+                {"symbol": "SKYT", "current_shares": None, "campaign_stop": "36.30"},
+            ]
+        )
+    )
+
+    assert result.columns.tolist() == CAMPAIGN_OVERRIDE_COLUMNS
+    assert result["symbol"].tolist() == ["SMCI", "SKYT"]
+    assert result["current_shares"].iloc[0] == 66.0
+    assert pd.isna(result["current_shares"].iloc[1])
+    assert result["campaign_stop"].tolist() == [44.9, 36.3]
+
+
+def test_apply_campaign_overrides_updates_visible_rows_only_and_recalculates_risk():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "SMCI",
+                "lots": 2,
+                "current_shares": 74,
+                "avg_entry": 43.79,
+                "campaign_stop": 44.0,
+                "sell_lot": 24,
+                "position_size": 3240.46,
+                "risk_at_campaign_stop": 0.0,
+            },
+            {
+                "symbol": "SKYT",
+                "lots": 1,
+                "current_shares": 11,
+                "avg_entry": 36.30,
+                "campaign_stop": 35.31,
+                "sell_lot": 3,
+                "position_size": 399.30,
+                "risk_at_campaign_stop": 10.89,
+            },
+        ]
+    )
+    overrides = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "current_shares": 66, "campaign_stop": 44.90},
+            {"symbol": "REMOVED", "current_shares": 99},
+        ]
+    )
+
+    result = apply_campaign_overrides(campaigns, overrides)
+
+    assert result["symbol"].tolist() == ["SMCI", "SKYT"]
+    assert result[["symbol", "current_shares", "campaign_stop", "sell_lot", "position_size", "risk_at_campaign_stop"]].to_dict("records") == [
+        {
+            "symbol": "SMCI",
+            "current_shares": 66,
+            "campaign_stop": 44.9,
+            "sell_lot": 22,
+            "position_size": 2890.14,
+            "risk_at_campaign_stop": 0.0,
+        },
+        {"symbol": "SKYT", "current_shares": 11, "campaign_stop": 35.31, "sell_lot": 3, "position_size": 399.3, "risk_at_campaign_stop": 10.89},
+    ]
+
+
+def test_apply_campaign_overrides_can_update_current_shares_and_campaign_stop_independently():
+    campaigns = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "current_shares": 74, "avg_entry": 43.79, "campaign_stop": 44.0},
+            {"symbol": "SKYT", "current_shares": 11, "avg_entry": 36.30, "campaign_stop": 35.31},
+        ]
+    )
+    overrides = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "current_shares": 66},
+            {"symbol": "SKYT", "campaign_stop": 36.30},
+        ]
+    )
+
+    result = apply_campaign_overrides(campaigns, overrides)
+
+    assert result[["symbol", "current_shares", "campaign_stop", "risk_at_campaign_stop"]].to_dict("records") == [
+        {"symbol": "SMCI", "current_shares": 66, "campaign_stop": 44.0, "risk_at_campaign_stop": 0.0},
+        {"symbol": "SKYT", "current_shares": 11, "campaign_stop": 36.3, "risk_at_campaign_stop": 0.0},
+    ]
+
+
+def test_campaign_risk_at_stop_clamps_manual_stop_above_entry_to_zero():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "KRYS",
+                "lots": 1,
+                "current_shares": 3,
+                "avg_entry": 304.84,
+                "campaign_stop": 298.00,
+                "sell_lot": 1,
+                "position_size": 914.52,
+                "risk_at_campaign_stop": 20.52,
+            }
+        ]
+    )
+    overrides = pd.DataFrame([{"symbol": "KRYS", "campaign_stop": 305.00}])
+
+    result = apply_campaign_overrides(campaigns, overrides)
+
+    assert result[["symbol", "current_shares", "campaign_stop", "risk_at_campaign_stop"]].to_dict("records") == [
+        {"symbol": "KRYS", "current_shares": 3, "campaign_stop": 305.0, "risk_at_campaign_stop": 0.0}
+    ]
+
+
+def test_campaign_stop_override_can_create_stop_only_free_roll():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "SMCI",
+                "lots": 2,
+                "current_shares": 66,
+                "avg_entry": 44.90,
+                "campaign_stop": 44.00,
+                "sell_lot": 22,
+                "position_size": 2963.40,
+                "risk_at_campaign_stop": 59.40,
+                "planned_lot_risk": 217.08,
+            }
+        ]
+    )
+    overridden = apply_campaign_overrides(campaigns, pd.DataFrame([{"symbol": "SMCI", "campaign_stop": 44.90}]))
+
+    result = campaign_trim_view(overridden, {})
+
+    assert result[["symbol", "campaign_stop", "risk_at_campaign_stop", "trim_count", "free_roll"]].to_dict("records") == [
+        {"symbol": "SMCI", "campaign_stop": 44.9, "risk_at_campaign_stop": 0.0, "trim_count": 0, "free_roll": "Yes"}
+    ]
+
+
+def test_campaign_overrides_from_editor_excludes_trim_columns_and_saves_only_manual_diffs():
+    base = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "current_shares": 74, "campaign_stop": 44.00, "avg_entry": 44.90},
+            {"symbol": "SKYT", "current_shares": 11, "campaign_stop": 35.31, "avg_entry": 36.30},
+        ]
+    )
+    edited = pd.DataFrame(
+        [
+            {
+                "symbol": "SMCI",
+                "current_shares": 66,
+                "campaign_stop": 44.90,
+                "avg_entry": 44.90,
+                "live_price": 55.20,
+                "trim_count": 6,
+                "free_roll": "No",
+            },
+            {
+                "symbol": "SKYT",
+                "current_shares": 11,
+                "campaign_stop": 35.31,
+                "avg_entry": 36.30,
+                "live_price": 50.00,
+                "trim_count": 1,
+                "free_roll": "No",
+            },
+        ]
+    )
+
+    result = campaign_overrides_from_editor(base, edited)
+
+    assert result.columns.tolist() == CAMPAIGN_OVERRIDE_COLUMNS
+    assert result.to_dict("records") == [{"symbol": "SMCI", "current_shares": 66, "campaign_stop": 44.9}]
+
+
+def test_campaign_overrides_from_editor_saves_stop_only_diff_and_drops_reverted_values():
+    base = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "current_shares": 66, "campaign_stop": 44.00},
+            {"symbol": "SKYT", "current_shares": 11, "campaign_stop": 35.31},
+        ]
+    )
+    edited = pd.DataFrame(
+        [
+            {"symbol": "SMCI", "current_shares": 66, "campaign_stop": 44.90},
+            {"symbol": "SKYT", "current_shares": 11, "campaign_stop": 35.31},
+        ]
+    )
+
+    result = campaign_overrides_from_editor(base, edited)
+
+    assert result.columns.tolist() == CAMPAIGN_OVERRIDE_COLUMNS
+    assert result["symbol"].tolist() == ["SMCI"]
+    assert pd.isna(result["current_shares"].iloc[0])
+    assert result["campaign_stop"].tolist() == [44.9]
+
+
+def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "SMCI",
+                "lots": 2,
+                "current_shares": 66,
+                "avg_entry": 44.90,
+                "campaign_stop": 44.00,
+                "sell_lot": 22,
+                "position_size": 2963.40,
+                "risk_at_campaign_stop": 59.40,
+                "planned_lot_risk": 217.08,
+            },
+            {
+                "symbol": "SKYT",
+                "lots": 1,
+                "current_shares": 11,
+                "avg_entry": 36.30,
+                "campaign_stop": 35.31,
+                "sell_lot": 3,
+                "position_size": 399.30,
+                "risk_at_campaign_stop": 10.89,
+                "planned_lot_risk": 11.55,
+            },
+        ]
+    )
+
+    result = campaign_trim_view(campaigns, {"SMCI": 55.20, "SKYT": 50.00})
+
+    assert result.columns.tolist() == CAMPAIGN_TRIM_VIEW_COLUMNS
+    assert result[
+        ["symbol", "live_price", "trim_count", "free_roll", "add_on_shares", "add_on_stop", "add_on_stop_percent"]
+    ].to_dict("records") == [
+        {
+            "symbol": "SMCI",
+            "live_price": "$55.20",
+            "trim_count": 6,
+            "free_roll": "No",
+            "add_on_shares": 33,
+            "add_on_stop": "$48.33",
+            "add_on_stop_percent": "12.45%",
+        },
+        {
+            "symbol": "SKYT",
+            "live_price": "$50.00",
+            "trim_count": 1,
+            "free_roll": "No",
+            "add_on_shares": 5,
+            "add_on_stop": "$40.58",
+            "add_on_stop_percent": "18.84%",
+        },
+    ]
+
+
+def test_campaign_trim_view_shows_na_for_zero_add_shares():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "NTAP",
+                "lots": 1,
+                "current_shares": 12,
+                "avg_entry": 187.32,
+                "campaign_stop": 172.00,
+                "sell_lot": 4,
+                "position_size": 2247.84,
+                "risk_at_campaign_stop": 183.84,
+                "planned_lot_risk": 183.84,
+            }
+        ]
+    )
+
+    result = campaign_trim_view(campaigns, {"NTAP": 173.94})
+
+    assert result[["symbol", "add_on_shares", "add_on_stop", "add_on_stop_percent"]].to_dict("records") == [
+        {"symbol": "NTAP", "add_on_shares": 0, "add_on_stop": "N/A", "add_on_stop_percent": "N/A"}
+    ]
+
+
+def test_campaign_trim_view_shows_placeholder_when_live_price_is_missing():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "SMCI",
+                "lots": 2,
+                "current_shares": 66,
+                "avg_entry": 44.90,
+                "campaign_stop": 44.00,
+                "sell_lot": 22,
+                "position_size": 2963.40,
+                "risk_at_campaign_stop": 59.40,
+                "planned_lot_risk": 217.08,
+            }
+        ]
+    )
+
+    result = campaign_trim_view(campaigns, {})
+
+    assert result[
+        ["symbol", "live_price", "trim_count", "add_on_shares", "add_on_stop", "add_on_stop_percent"]
+    ].to_dict("records") == [
+        {
+            "symbol": "SMCI",
+            "live_price": "-",
+            "trim_count": "-",
+            "add_on_shares": "-",
+            "add_on_stop": "-",
+            "add_on_stop_percent": "-",
+        }
+    ]
+
+
+def test_calculate_trim_to_free_roll_returns_zero_when_already_free_roll():
+    row = pd.Series({"current_shares": 74, "avg_entry": 43.79, "campaign_stop": 44.0})
+
+    assert calculate_trim_to_free_roll(row, None) == (0, True)
+
+
+def test_calculate_trim_to_free_roll_rounds_up_to_break_even():
+    row = pd.Series({"current_shares": 66, "avg_entry": 44.90, "campaign_stop": 44.00})
+
+    assert calculate_trim_to_free_roll(row, 55.20) == (6, False)
+
+
+def test_calculate_trim_to_free_roll_blanks_when_live_price_is_missing_or_below_stop():
+    row = pd.Series({"current_shares": 66, "avg_entry": 44.90, "campaign_stop": 44.00})
+
+    assert calculate_trim_to_free_roll(row, None) == (None, False)
+    assert calculate_trim_to_free_roll(row, 44.00) == (None, False)
+    assert calculate_trim_to_free_roll(row, 43.50) == (None, False)
+
+
+def test_calculate_trim_to_free_roll_uses_trim_credit_to_mark_free_roll():
+    row = pd.Series({"current_shares": 4, "avg_entry": 29.08, "campaign_stop": 27.87})
+
+    assert calculate_trim_to_free_roll(row, None, 6.36) == (0, True)
+
+
+def test_calculate_trim_to_free_roll_uses_uncovered_risk_after_trim_credit():
+    row = pd.Series({"current_shares": 10, "avg_entry": 29.08, "campaign_stop": 27.87})
+
+    assert calculate_trim_to_free_roll(row, 30.14, 6.36) == (3, False)
+
+
+def test_campaign_trim_view_uses_campaign_trim_credit_by_symbol():
+    campaigns = pd.DataFrame(
+        [
+            {
+                "symbol": "ATEN",
+                "lots": 1,
+                "current_shares": 4,
+                "avg_entry": 29.08,
+                "campaign_stop": 27.87,
+                "sell_lot": 1,
+                "position_size": 116.32,
+                "risk_at_campaign_stop": 4.84,
+                "planned_lot_risk": 12.10,
+            }
+        ]
+    )
+    trim_credits = pd.DataFrame([{"symbol": "ATEN", "realized_trim_credit": 6.36}])
+
+    result = campaign_trim_view(campaigns, {}, trim_credits)
+
+    assert result[["symbol", "trim_count", "free_roll"]].to_dict("records") == [
+        {"symbol": "ATEN", "trim_count": 0, "free_roll": "Yes"}
+    ]
+
+
+def test_calculate_campaign_add_on_uses_half_size_and_new_blended_stop():
+    row = pd.Series({"current_shares": 100, "avg_entry": 100.00})
+
+    assert calculate_campaign_add_on(row, 110.00) == (50, 103.33)
+
+
+def test_calculate_campaign_add_on_floors_half_size_for_odd_share_count():
+    row = pd.Series({"current_shares": 101, "avg_entry": 100.00})
+
+    assert calculate_campaign_add_on(row, 110.00) == (50, 103.31)
+
+
+def test_calculate_campaign_add_on_blanks_when_live_price_is_missing():
+    row = pd.Series({"current_shares": 100, "avg_entry": 100.00})
+
+    assert calculate_campaign_add_on(row, None) == (None, None)
+
+
+def test_calculate_campaign_add_on_returns_zero_shares_when_live_price_is_not_above_entry():
+    row = pd.Series({"current_shares": 100, "avg_entry": 100.00})
+
+    assert calculate_campaign_add_on(row, 100.00) == (0, None)
+    assert calculate_campaign_add_on(row, 99.99) == (0, None)
+
+
+def test_calculate_campaign_add_on_returns_zero_shares_when_half_size_floors_to_zero():
+    row = pd.Series({"current_shares": 1, "avg_entry": 100.00})
+
+    assert calculate_campaign_add_on(row, 110.00) == (0, None)
+
+
+def test_campaign_trim_view_keeps_trim_columns_out_of_campaign_storage_columns():
+    assert not set(CAMPAIGN_TRIM_VIEW_COLUMNS) - set(
+        [
+            *CAMPAIGN_VIEW_COLUMNS,
+            "live_price",
+            "trim_count",
+            "free_roll",
+            "add_on_shares",
+            "add_on_stop",
+            "add_on_stop_percent",
+        ]
+    )
+    assert "live_price" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "trim_count" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "free_roll" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "add_on_shares" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "add_on_stop" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "add_on_stop_percent" not in CAMPAIGN_OVERRIDE_COLUMNS
+
+
+def test_risk_neutral_add_on_triggers_for_single_robinhood_open_lot():
+    open_lots = pd.DataFrame(
+        [
+            {
+                "symbol": "SMCI",
+                "buy_date": "2026-05-26",
+                "quantity": 18,
+                "planned_stop": 35.25,
+                "strategy": "4% BO",
+                "buy_price": 36.03,
+            }
+        ]
+    )
+    draft = pd.Series(
+        {
+            "symbol": "SMCI",
+            "share_price": 48.23,
+            "stop_price": 44.00,
+            "number_of_shares": 48,
+            "portfolio_amount": 19_250,
+        }
+    )
+
+    result = risk_neutral_add_on(symbol="SMCI", draft=draft, open_lots=open_lots, positions=pd.DataFrame())
+
+    assert result is not None
+    assert result.source == "Robinhood"
+    assert result.current_shares == 18
+    assert result.draft_shares == 48
+    assert result.combined_shares == 66
+    assert result.combined_avg_entry == 44.9
+    assert result.combined_risk_at_stop == 59.58
+    assert result.max_risk_neutral_shares == 33
+    assert result.max_risk_neutral_risk_percent == 0.73
+    assert result.risk_neutral is False
+
+
+def test_risk_neutral_add_on_reports_safe_draft_within_cap():
+    open_lots = pd.DataFrame(
+        [{"symbol": "SMCI", "buy_date": "2026-05-26", "quantity": 18, "buy_price": 36.03}]
+    )
+    draft = pd.Series(
+        {
+            "symbol": "SMCI",
+            "share_price": 48.23,
+            "stop_price": 44.00,
+            "number_of_shares": 30,
+            "portfolio_amount": 19_250,
+        }
+    )
+
+    result = risk_neutral_add_on(symbol="SMCI", draft=draft, open_lots=open_lots, positions=pd.DataFrame())
+
+    assert result is not None
+    assert result.max_risk_neutral_shares == 33
+    assert result.combined_risk_at_stop == -16.56
+    assert result.risk_neutral is True
+
+
+def test_risk_neutral_add_on_uses_active_positions_when_robinhood_has_no_symbol():
+    positions = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "SMCI",
+                    "buy_date": "2026-05-26",
+                    "share_price": 36.11,
+                    "stop_price": 35.25,
+                    "portfolio_amount": 19_250,
+                    "risk_percent": 0.12,
+                }
+            ]
+        )
+    )
+    draft = pd.Series(
+        {
+            "symbol": "SMCI",
+            "share_price": 47.95,
+            "stop_price": 44.00,
+            "number_of_shares": 48,
+            "portfolio_amount": 19_250,
+        }
+    )
+
+    result = risk_neutral_add_on(symbol="SMCI", draft=draft, open_lots=pd.DataFrame(), positions=positions)
+
+    assert result is not None
+    assert result.source == "Positions"
+    assert result.current_shares == 26
+    assert result.max_risk_neutral_shares == 51
+    assert result.combined_risk_at_stop == -15.54
+    assert result.risk_neutral is True
+
+
+def test_risk_neutral_add_on_returns_none_for_unowned_symbol():
+    draft = pd.Series(
+        {
+            "symbol": "SMCI",
+            "share_price": 48.23,
+            "stop_price": 44.00,
+            "number_of_shares": 48,
+            "portfolio_amount": 19_250,
+        }
+    )
+
+    result = risk_neutral_add_on(symbol="SMCI", draft=draft, open_lots=pd.DataFrame(), positions=pd.DataFrame())
+
+    assert result is None
+
+
+def test_risk_neutral_add_on_message_formats_positive_result_compactly():
+    message = risk_neutral_add_on_message(
+        RiskNeutralAddOn(
+            symbol="FTNT",
+            source="Robinhood",
+            current_shares=10,
+            avg_entry=120,
+            draft_shares=6,
+            combined_shares=16,
+            combined_avg_entry=126,
+            combined_risk_at_stop=-10,
+            max_risk_neutral_shares=11,
+            max_risk_neutral_risk_percent=0.31,
+            risk_neutral=True,
+        )
+    )
+
+    assert message == ("Risk-neutral: Yes. Max size 11; draft 6.", "ready")
+
+
+def test_risk_neutral_add_on_message_formats_negative_result_with_cap_compactly():
+    message = risk_neutral_add_on_message(
+        RiskNeutralAddOn(
+            symbol="FTNT",
+            source="Robinhood",
+            current_shares=10,
+            avg_entry=120,
+            draft_shares=26,
+            combined_shares=36,
+            combined_avg_entry=132,
+            combined_risk_at_stop=50,
+            max_risk_neutral_shares=11,
+            max_risk_neutral_risk_percent=0.31,
+            risk_neutral=False,
+        )
+    )
+
+    assert message == ("Risk-neutral: No. Max size 11 (cap 0.31%); draft 26.", "idle")
+
+
+def test_risk_neutral_add_on_message_formats_negative_result_without_cap_compactly():
+    message = risk_neutral_add_on_message(
+        RiskNeutralAddOn(
+            symbol="FTNT",
+            source="Robinhood",
+            current_shares=10,
+            avg_entry=120,
+            draft_shares=26,
+            combined_shares=36,
+            combined_avg_entry=132,
+            combined_risk_at_stop=50,
+            max_risk_neutral_shares=11,
+            max_risk_neutral_risk_percent=None,
+            risk_neutral=False,
+        )
+    )
+
+    assert message == ("Risk-neutral: No. Max size 11; draft 26.", "idle")
 
 
 def test_public_output_columns_exclude_internal_fields():

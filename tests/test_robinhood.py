@@ -219,6 +219,51 @@ def test_derive_fifo_trades_excludes_partially_open_lots_from_closed_trades():
     assert result.open_lots.iloc[0]["quantity"] == 5
 
 
+def test_derive_fifo_trades_tracks_trim_credit_for_partially_open_campaign():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 10, "price": 100},
+            {"activity_date": "2026-04-03", "symbol": "AAPL", "trans_code": "Sell", "quantity": 5, "price": 110},
+        ]
+    )
+
+    result = derive_fifo_trades(transactions, pd.DataFrame())
+
+    assert result.closed_trades.empty
+    assert result.campaign_trim_credits.to_dict("records") == [{"symbol": "AAPL", "realized_trim_credit": 50.0}]
+
+
+def test_derive_fifo_trades_keeps_closed_lot_credit_in_active_symbol_campaign():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-01", "symbol": "SMCI", "trans_code": "Buy", "quantity": 5, "price": 100},
+            {"activity_date": "2026-04-02", "symbol": "SMCI", "trans_code": "Buy", "quantity": 5, "price": 120},
+            {"activity_date": "2026-04-03", "symbol": "SMCI", "trans_code": "Sell", "quantity": 5, "price": 130},
+        ]
+    )
+
+    result = derive_fifo_trades(transactions, pd.DataFrame())
+
+    assert result.closed_trades["quantity"].tolist() == [5]
+    assert result.open_lots["quantity"].tolist() == [5]
+    assert result.campaign_trim_credits.to_dict("records") == [{"symbol": "SMCI", "realized_trim_credit": 150.0}]
+
+
+def test_derive_fifo_trades_does_not_carry_trim_credit_into_reopened_campaign():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-01", "symbol": "AAPL", "trans_code": "Buy", "quantity": 10, "price": 100},
+            {"activity_date": "2026-04-03", "symbol": "AAPL", "trans_code": "Sell", "quantity": 10, "price": 110},
+            {"activity_date": "2026-04-04", "symbol": "AAPL", "trans_code": "Buy", "quantity": 5, "price": 200},
+        ]
+    )
+
+    result = derive_fifo_trades(transactions, pd.DataFrame())
+
+    assert result.open_lots["quantity"].tolist() == [5]
+    assert result.campaign_trim_credits.to_dict("records") == [{"symbol": "AAPL", "realized_trim_credit": 0.0}]
+
+
 def test_derive_fifo_trades_matches_same_day_buys_by_exact_quantity():
     transactions = pd.DataFrame(
         [

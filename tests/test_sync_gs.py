@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from stock_calculator.calculations import POSITION_SOURCE_COLUMNS
+from stock_calculator.calculations import CAMPAIGN_OVERRIDE_COLUMNS, POSITION_SOURCE_COLUMNS
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS
 from stock_calculator.storage import POSITION_ARCHIVE_COLUMNS
 from tools import sync_gs
@@ -47,6 +47,12 @@ def test_pull_google_sheets_writes_normalized_local_csv_files(tmp_path):
                     ["pos_1", "aapl", "2026-04-01", "100", "95", "2.5", "", "EP", "", "20", "", "", "", "", "", ""],
                 ]
             ),
+            "campaign_overrides": FakeWorksheet(
+                [
+                    CAMPAIGN_OVERRIDE_COLUMNS,
+                    ["smci", "66"],
+                ]
+            ),
             "planned_stops": FakeWorksheet(
                 [
                     PLANNED_STOP_COLUMNS,
@@ -71,11 +77,13 @@ def test_pull_google_sheets_writes_normalized_local_csv_files(tmp_path):
     assert [(result.worksheet, result.rows, result.wrote) for result in results] == [
         ("positions", 1, True),
         ("positions_archive", 1, True),
+        ("campaign_overrides", 1, True),
         ("planned_stops", 1, True),
         ("robinhood_transactions", 1, True),
     ]
     assert pd.read_csv(data_dir / "positions.csv")["symbol"].tolist() == ["AAPL"]
     assert pd.read_csv(data_dir / "positions_archive.csv")["strategy"].tolist() == ["EP"]
+    assert pd.read_csv(data_dir / "campaign_overrides.csv")["symbol"].tolist() == ["SMCI"]
     assert pd.read_csv(data_dir / "planned_stops.csv")["market_regime"].tolist() == ["SELECTIVE GO"]
     assert pd.read_csv(data_dir / "robinhood_transactions.csv")["symbol"].tolist() == ["AAPL"]
 
@@ -87,6 +95,7 @@ def test_pull_google_sheets_dry_run_does_not_write_files(tmp_path):
         {
             "positions": FakeWorksheet([POSITION_SOURCE_COLUMNS, ["", "msft", "", "", "", "", "", ""]]),
             "positions_archive": FakeWorksheet([POSITION_ARCHIVE_COLUMNS]),
+            "campaign_overrides": FakeWorksheet([CAMPAIGN_OVERRIDE_COLUMNS]),
             "planned_stops": FakeWorksheet([PLANNED_STOP_COLUMNS]),
             "robinhood_transactions": FakeWorksheet([TRANSACTION_COLUMNS]),
         }
@@ -102,6 +111,7 @@ def test_pull_google_sheets_dry_run_does_not_write_files(tmp_path):
     assert [(result.worksheet, result.rows, result.wrote) for result in results] == [
         ("positions", 1, False),
         ("positions_archive", 0, False),
+        ("campaign_overrides", 0, False),
         ("planned_stops", 0, False),
         ("robinhood_transactions", 0, False),
     ]

@@ -11,11 +11,12 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from stock_calculator.calculations import POSITION_SOURCE_COLUMNS, committed_positions
+from stock_calculator.calculations import CAMPAIGN_OVERRIDE_COLUMNS, POSITION_SOURCE_COLUMNS, committed_positions, normalize_campaign_overrides
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS
 from stock_calculator.storage import (
     GOOGLE_SHEETS_SECRET,
     GCP_SERVICE_ACCOUNT_SECRET,
+    CAMPAIGN_OVERRIDES_WORKSHEET,
     PLANNED_STOPS_WORKSHEET,
     POSITIONS_ARCHIVE_WORKSHEET,
     POSITIONS_WORKSHEET,
@@ -74,6 +75,13 @@ SYNC_TABLES = (
         columns=POSITION_ARCHIVE_COLUMNS,
         normalize=_normalize_positions_archive,
         save=lambda storage, df: storage.save_positions_archive(df),
+    ),
+    SyncTable(
+        worksheet=CAMPAIGN_OVERRIDES_WORKSHEET,
+        filename="campaign_overrides.csv",
+        columns=CAMPAIGN_OVERRIDE_COLUMNS,
+        normalize=normalize_campaign_overrides,
+        save=lambda storage, df: storage.save_campaign_overrides(df),
     ),
     SyncTable(
         worksheet=PLANNED_STOPS_WORKSHEET,
@@ -204,6 +212,7 @@ def _local_storage(data_dir: Path) -> LocalCsvStorage:
     return LocalCsvStorage(
         positions_path=data_dir / "positions.csv",
         positions_archive_path=data_dir / "positions_archive.csv",
+        campaign_overrides_path=data_dir / "campaign_overrides.csv",
         planned_stops_path=data_dir / "planned_stops.csv",
         transactions_path=data_dir / "robinhood_transactions.csv",
     )

@@ -1,7 +1,12 @@
 import pandas as pd
 import pytest
 
-from stock_calculator.calculations import POSITION_ID_COLUMN, POSITION_SOURCE_COLUMNS, calculate_positions
+from stock_calculator.calculations import (
+    CAMPAIGN_OVERRIDE_COLUMNS,
+    POSITION_ID_COLUMN,
+    POSITION_SOURCE_COLUMNS,
+    calculate_positions,
+)
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, calculate_trade_metrics, derive_fifo_trades
 from stock_calculator.storage import (
     GoogleSheetsStorage,
@@ -11,10 +16,12 @@ from stock_calculator.storage import (
     append_robinhood_transactions,
     build_storage_backend,
     generate_planned_stops_from_transactions,
+    load_campaign_overrides,
     load_planned_stops,
     load_positions,
     load_positions_archive,
     load_robinhood_transactions,
+    save_campaign_overrides,
     save_planned_stops,
     save_positions,
     save_positions_archive,
@@ -164,6 +171,66 @@ def test_load_robinhood_transactions_returns_empty_frame_for_missing_file(tmp_pa
 
     assert loaded.empty
     assert loaded.columns.tolist() == TRANSACTION_COLUMNS
+
+
+def test_save_and_load_campaign_overrides_preserves_only_editable_campaign_fields(tmp_path):
+    path = tmp_path / "campaign_overrides.csv"
+    save_campaign_overrides(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": " smci ",
+                    "lots": "2",
+                    "current_shares": "66",
+                    "avg_entry": "44.90",
+                    "campaign_stop": "44.00",
+                    "sell_lot": "22",
+                    "position_size": "2963.58",
+                    "risk_at_campaign_stop": "59.58",
+                    "planned_lot_risk": "217.08",
+                    "live_price": "55.20",
+                    "trim_count": "6",
+                    "free_roll": "No",
+                    "strategy": "Mixed",
+                    "source": "Robinhood",
+                },
+                {"symbol": "", "current_shares": "10"},
+            ]
+        ),
+        path,
+    )
+
+    loaded = load_campaign_overrides(path)
+    saved_columns = pd.read_csv(path).columns.tolist()
+
+    assert saved_columns == CAMPAIGN_OVERRIDE_COLUMNS
+    assert loaded.columns.tolist() == CAMPAIGN_OVERRIDE_COLUMNS
+    assert loaded.to_dict("records") == [
+        {
+            "symbol": "SMCI",
+            "current_shares": 66,
+            "campaign_stop": 44.0,
+        }
+    ]
+
+
+def test_load_campaign_overrides_returns_empty_frame_for_missing_file(tmp_path):
+    loaded = load_campaign_overrides(tmp_path / "missing.csv")
+
+    assert loaded.empty
+    assert loaded.columns.tolist() == CAMPAIGN_OVERRIDE_COLUMNS
+
+
+def test_load_campaign_overrides_accepts_override_only_file(tmp_path):
+    path = tmp_path / "campaign_overrides.csv"
+    pd.DataFrame([{"symbol": "smci", "current_shares": 60}]).to_csv(path, index=False)
+
+    loaded = load_campaign_overrides(path)
+
+    assert loaded.columns.tolist() == CAMPAIGN_OVERRIDE_COLUMNS
+    assert loaded["symbol"].tolist() == ["SMCI"]
+    assert loaded["current_shares"].tolist() == [60]
+    assert loaded["campaign_stop"].isna().tolist() == [True]
 
 
 def test_load_planned_stops_returns_empty_frame_for_missing_file(tmp_path):
@@ -499,6 +566,36 @@ def test_google_sheets_positions_archive_is_created_and_normalized():
 
     assert spreadsheet.worksheets["positions_archive"].values[0] == POSITION_ARCHIVE_COLUMNS
     assert spreadsheet.worksheets["positions_archive"].values[1][1:5] == ["AAPL", "2026-04-01", 100, 95]
+
+
+def test_google_sheets_campaign_overrides_is_created_and_normalized():
+    spreadsheet = FakeSpreadsheet()
+    backend = GoogleSheetsStorage(spreadsheet)
+
+    backend.save_campaign_overrides(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "smci",
+                    "lots": "2",
+                    "current_shares": "66",
+                    "avg_entry": "44.90",
+                    "campaign_stop": "44.00",
+                    "sell_lot": "22",
+                    "position_size": "2963.58",
+                    "risk_at_campaign_stop": "59.58",
+                    "planned_lot_risk": "217.08",
+                    "strategy": "Mixed",
+                    "source": "Robinhood",
+                }
+            ]
+        )
+    )
+
+    assert spreadsheet.worksheets["campaign_overrides"].values == [
+        CAMPAIGN_OVERRIDE_COLUMNS,
+        ["SMCI", 66, 44],
+    ]
 
 
 def test_google_sheets_load_preserves_expected_column_order():
