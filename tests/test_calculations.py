@@ -864,7 +864,7 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
     ].to_dict("records") == [
         {
             "symbol": "SMCI",
-            "stop_itm": "$0.00",
+            "stop_itm": 0.0,
             "live_price": "$55.20",
             "trim_count": 6,
             "free_roll": "No",
@@ -874,7 +874,7 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
         },
         {
             "symbol": "SKYT",
-            "stop_itm": "$0.00",
+            "stop_itm": 0.0,
             "live_price": "$50.00",
             "trim_count": 1,
             "free_roll": "No",
@@ -933,7 +933,7 @@ def test_campaign_trim_view_shows_placeholder_when_live_price_is_missing():
     ].to_dict("records") == [
         {
             "symbol": "SMCI",
-            "stop_itm": "$0.00",
+            "stop_itm": 0.0,
             "live_price": "-",
             "trim_count": "-",
             "add_on_shares": "-",
@@ -1021,7 +1021,7 @@ def test_campaign_trim_view_uses_campaign_trim_credit_by_symbol():
     result = campaign_trim_view(campaigns, {}, trim_credits)
 
     assert result[["symbol", "stop_itm", "trim_count", "free_roll"]].to_dict("records") == [
-        {"symbol": "ATEN", "stop_itm": "$1.52", "trim_count": 0, "free_roll": "Yes"}
+        {"symbol": "ATEN", "stop_itm": 1.52, "trim_count": 0, "free_roll": "Yes"}
     ]
 
 

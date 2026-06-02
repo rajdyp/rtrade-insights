@@ -714,7 +714,7 @@ def campaign_trim_view(
         realized_trim_credit = trim_credits.get(symbol, 0.0)
         trim_count, free_roll = calculate_trim_to_free_roll(row, live_price, realized_trim_credit)
         add_on_shares, add_on_stop = calculate_campaign_add_on(row, live_price)
-        frame.loc[index, "stop_itm"] = format_currency(calculate_stop_itm(row, realized_trim_credit))
+        frame.loc[index, "stop_itm"] = calculate_stop_itm(row, realized_trim_credit)
         frame.loc[index, "live_price"] = format_currency(live_price) or DISPLAY_PLACEHOLDER
         frame.loc[index, "trim_count"] = _format_display_count(trim_count)
         frame.loc[index, "free_roll"] = "Yes" if free_roll else "No"
