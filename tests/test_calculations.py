@@ -13,10 +13,12 @@ from stock_calculator.calculations import (
     RiskNeutralAddOn,
     append_committed_position,
     apply_campaign_overrides,
+    campaign_free_roll_summary,
     campaign_overrides_from_editor,
     campaign_trim_view,
     campaign_view_positions,
     calculate_campaign_add_on,
+    calculate_stop_itm,
     calculate_trim_to_free_roll,
     calculate_positions,
     committed_positions,
@@ -849,10 +851,20 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
 
     assert result.columns.tolist() == CAMPAIGN_TRIM_VIEW_COLUMNS
     assert result[
-        ["symbol", "live_price", "trim_count", "free_roll", "add_on_shares", "add_on_stop", "add_on_stop_percent"]
+        [
+            "symbol",
+            "stop_itm",
+            "live_price",
+            "trim_count",
+            "free_roll",
+            "add_on_shares",
+            "add_on_stop",
+            "add_on_stop_percent",
+        ]
     ].to_dict("records") == [
         {
             "symbol": "SMCI",
+            "stop_itm": "$0.00",
             "live_price": "$55.20",
             "trim_count": 6,
             "free_roll": "No",
@@ -862,6 +874,7 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
         },
         {
             "symbol": "SKYT",
+            "stop_itm": "$0.00",
             "live_price": "$50.00",
             "trim_count": 1,
             "free_roll": "No",
@@ -916,10 +929,11 @@ def test_campaign_trim_view_shows_placeholder_when_live_price_is_missing():
     result = campaign_trim_view(campaigns, {})
 
     assert result[
-        ["symbol", "live_price", "trim_count", "add_on_shares", "add_on_stop", "add_on_stop_percent"]
+        ["symbol", "stop_itm", "live_price", "trim_count", "add_on_shares", "add_on_stop", "add_on_stop_percent"]
     ].to_dict("records") == [
         {
             "symbol": "SMCI",
+            "stop_itm": "$0.00",
             "live_price": "-",
             "trim_count": "-",
             "add_on_shares": "-",
@@ -961,6 +975,31 @@ def test_calculate_trim_to_free_roll_uses_uncovered_risk_after_trim_credit():
     assert calculate_trim_to_free_roll(row, 30.14, 6.36) == (3, False)
 
 
+def test_calculate_stop_itm_uses_stop_above_average_entry():
+    row = pd.Series({"current_shares": 10, "avg_entry": 29.08, "campaign_stop": 30.00})
+
+    assert calculate_stop_itm(row) == 9.2
+
+
+def test_calculate_stop_itm_clamps_stop_below_average_entry_to_zero():
+    row = pd.Series({"current_shares": 3, "avg_entry": 151.60, "campaign_stop": 149.00})
+
+    assert calculate_stop_itm(row) == 0.0
+
+
+def test_calculate_stop_itm_includes_realized_trim_credit():
+    row = pd.Series({"current_shares": 4, "avg_entry": 29.08, "campaign_stop": 27.87})
+
+    assert calculate_stop_itm(row, 10.00) == 5.16
+
+
+def test_calculate_stop_itm_exact_breakeven_is_zero_while_free_roll_is_yes():
+    row = pd.Series({"current_shares": 4, "avg_entry": 29.08, "campaign_stop": 27.87})
+
+    assert calculate_stop_itm(row, 4.84) == 0.0
+    assert calculate_trim_to_free_roll(row, None, 4.84) == (0, True)
+
+
 def test_campaign_trim_view_uses_campaign_trim_credit_by_symbol():
     campaigns = pd.DataFrame(
         [
@@ -981,9 +1020,25 @@ def test_campaign_trim_view_uses_campaign_trim_credit_by_symbol():
 
     result = campaign_trim_view(campaigns, {}, trim_credits)
 
-    assert result[["symbol", "trim_count", "free_roll"]].to_dict("records") == [
-        {"symbol": "ATEN", "trim_count": 0, "free_roll": "Yes"}
+    assert result[["symbol", "stop_itm", "trim_count", "free_roll"]].to_dict("records") == [
+        {"symbol": "ATEN", "stop_itm": "$1.52", "trim_count": 0, "free_roll": "Yes"}
     ]
+
+
+def test_campaign_free_roll_summary_counts_yes_rows():
+    frame = pd.DataFrame({"free_roll": ["Yes", "No", "Yes", "No", "Yes", "Yes", "No", "Yes", "No", "No"]})
+
+    assert campaign_free_roll_summary(frame) == "Free Roll: 5 / 10 (50%)"
+
+
+def test_campaign_free_roll_summary_handles_empty_frame():
+    assert campaign_free_roll_summary(pd.DataFrame(columns=["free_roll"])) == "Free Roll: 0 / 0 (0%)"
+
+
+def test_campaign_free_roll_summary_counts_only_normalized_yes_values():
+    frame = pd.DataFrame({"free_roll": ["Yes", " yes ", "YES", "", None, "No"]})
+
+    assert campaign_free_roll_summary(frame) == "Free Roll: 1 / 6 (17%)"
 
 
 def test_calculate_campaign_add_on_uses_half_size_and_new_blended_stop():
@@ -1021,6 +1076,7 @@ def test_campaign_trim_view_keeps_trim_columns_out_of_campaign_storage_columns()
     assert not set(CAMPAIGN_TRIM_VIEW_COLUMNS) - set(
         [
             *CAMPAIGN_VIEW_COLUMNS,
+            "stop_itm",
             "live_price",
             "trim_count",
             "free_roll",

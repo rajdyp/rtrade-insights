@@ -13,6 +13,7 @@ from stock_calculator.calculations import (
     PUBLIC_OUTPUT_COLUMNS,
     append_committed_position,
     apply_campaign_overrides,
+    campaign_free_roll_summary,
     campaign_overrides_from_editor,
     campaign_trim_view,
     campaign_view_positions,
@@ -595,15 +596,16 @@ def campaign_view_column_config() -> dict:
         "avg_entry": st.column_config.NumberColumn("Avg Entry", format="$%.2f", width=84),
         "campaign_stop": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=110),
         "sell_lot": st.column_config.NumberColumn("Sell Lot", width=72),
-        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=104),
-        "risk_at_campaign_stop": st.column_config.NumberColumn("Risk at Stop", format="$%.2f", width=104),
+        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=95),
+        "risk_at_campaign_stop": st.column_config.NumberColumn("Risk at Stop", format="$%.2f", width=95),
         "planned_lot_risk": st.column_config.NumberColumn("Planned Risk", format="$%.2f", width=104),
-        "live_price": st.column_config.TextColumn("Live Price", width=92),
+        "stop_itm": st.column_config.TextColumn("Stop ITM", width=86),
+        "live_price": st.column_config.TextColumn("Live Price", width=85),
         "trim_count": st.column_config.TextColumn("Trim Count", width=82),
-        "free_roll": st.column_config.TextColumn("Free Roll", width=82),
-        "add_on_shares": st.column_config.TextColumn("Add Shares", width=92),
-        "add_on_stop": st.column_config.TextColumn("Add Stop", width=88),
-        "add_on_stop_percent": st.column_config.TextColumn("Add Stop %", width=92),
+        "free_roll": st.column_config.TextColumn("Free Roll", width=77),
+        "add_on_shares": st.column_config.TextColumn("Add Count", width=85),
+        "add_on_stop": st.column_config.TextColumn("Add Stop", width=80),
+        "add_on_stop_percent": st.column_config.TextColumn("Add Stop %", width=85),
         "strategy": st.column_config.TextColumn("Strategy", width=82),
         "source": st.column_config.TextColumn("Source", width=86),
     }
@@ -1414,11 +1416,17 @@ if not campaign_view.empty:
                     st.session_state.campaign_price_feedback = refresh_campaign_live_prices(campaign_view)
                 except ValueError as exc:
                     st.session_state.campaign_price_feedback = (str(exc), "error")
+        campaign_editor_frame = campaign_view_editor_frame(campaign_view, robinhood_derivation.campaign_trim_credits)
+        with campaign_action_cols[1]:
+            st.markdown(
+                f"<div style='text-align: right;'>{escape(campaign_free_roll_summary(campaign_editor_frame))}</div>",
+                unsafe_allow_html=True,
+            )
         if st.session_state.campaign_price_feedback is not None:
             render_feedback(st.session_state.campaign_price_feedback[0], st.session_state.campaign_price_feedback[1])
 
         edited_campaigns = st.data_editor(
-            campaign_view_editor_frame(campaign_view, robinhood_derivation.campaign_trim_credits),
+            campaign_editor_frame,
             column_config=campaign_view_column_config(),
             disabled=[column for column in CAMPAIGN_TRIM_VIEW_COLUMNS if column not in EDITABLE_CAMPAIGN_VIEW_COLUMNS],
             height=robinhood_dataframe_height(len(campaign_view)),
