@@ -88,6 +88,7 @@ CAMPAIGN_VIEW_COLUMNS = [
 ]
 
 CAMPAIGN_TRIM_COLUMNS = [
+    "stop_itm",
     "live_price",
     "trim_count",
     "free_roll",
@@ -710,8 +711,10 @@ def campaign_trim_view(
     for index, row in frame.iterrows():
         symbol = str(row.get("symbol") or "").upper().strip()
         live_price = prices.get(symbol)
-        trim_count, free_roll = calculate_trim_to_free_roll(row, live_price, trim_credits.get(symbol, 0.0))
+        realized_trim_credit = trim_credits.get(symbol, 0.0)
+        trim_count, free_roll = calculate_trim_to_free_roll(row, live_price, realized_trim_credit)
         add_on_shares, add_on_stop = calculate_campaign_add_on(row, live_price)
+        frame.loc[index, "stop_itm"] = format_currency(calculate_stop_itm(row, realized_trim_credit))
         frame.loc[index, "live_price"] = format_currency(live_price) or DISPLAY_PLACEHOLDER
         frame.loc[index, "trim_count"] = _format_display_count(trim_count)
         frame.loc[index, "free_roll"] = "Yes" if free_roll else "No"
@@ -724,6 +727,19 @@ def campaign_trim_view(
         )
 
     return frame[CAMPAIGN_TRIM_VIEW_COLUMNS]
+
+
+def campaign_free_roll_summary(frame: pd.DataFrame) -> str:
+    total = len(frame)
+    if total == 0:
+        return "Free Roll: 0 / 0 (0%)"
+
+    if "free_roll" not in frame.columns:
+        free_roll_count = 0
+    else:
+        free_roll_count = int((frame["free_roll"].fillna("").astype(str).str.strip() == "Yes").sum())
+    percent = round((free_roll_count / total) * 100)
+    return f"Free Roll: {free_roll_count} / {total} ({percent}%)"
 
 
 def campaign_overrides_from_editor(base_campaigns: pd.DataFrame, edited_campaigns: pd.DataFrame) -> pd.DataFrame:
@@ -786,6 +802,19 @@ def calculate_trim_to_free_roll(row: pd.Series, live_price: Any, realized_trim_c
     trim_count = math.ceil(effective_loss_if_stopped / (live_price - campaign_stop))
     trim_count = max(0, min(trim_count, math.ceil(current_shares)))
     return trim_count, False
+
+
+def calculate_stop_itm(row: pd.Series, realized_trim_credit: Any = 0) -> float:
+    current_shares = _to_float(row.get("current_shares"))
+    avg_entry = _to_float(row.get("avg_entry"))
+    campaign_stop = _to_float(row.get("campaign_stop"))
+    realized_trim_credit = _to_float(realized_trim_credit) or 0.0
+
+    if current_shares is None or avg_entry is None or campaign_stop is None or current_shares <= 0:
+        return 0.0
+
+    stop_pnl = ((campaign_stop - avg_entry) * current_shares) + realized_trim_credit
+    return max(0.0, round(stop_pnl, 2))
 
 
 def _campaign_trim_credit_by_symbol(campaign_trim_credits: pd.DataFrame | None) -> dict[str, float]:
