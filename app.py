@@ -599,7 +599,7 @@ def campaign_view_column_config() -> dict:
         "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=95),
         "risk_at_campaign_stop": st.column_config.NumberColumn("Risk at Stop", format="$%.2f", width=95),
         "planned_lot_risk": st.column_config.NumberColumn("Planned Risk", format="$%.2f", width=104),
-        "stop_itm": st.column_config.TextColumn("Stop ITM", width=86),
+        "stop_itm": st.column_config.NumberColumn("Stop ITM", format="$%.2f", width=86),
         "live_price": st.column_config.TextColumn("Live Price", width=85),
         "trim_count": st.column_config.TextColumn("Trim Count", width=82),
         "free_roll": st.column_config.TextColumn("Free Roll", width=77),
