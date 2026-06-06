@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -526,13 +527,14 @@ def append_robinhood_transactions(existing: pd.DataFrame, incoming: pd.DataFrame
     if additions.empty:
         return current, 0
 
-    seen = set(_transaction_keys(current))
+    existing_counts = Counter(_transaction_keys(current))
+    incoming_counts = Counter()
     new_rows = []
     for _, row in additions.iterrows():
         key = _transaction_key(row)
-        if key in seen:
+        incoming_counts[key] += 1
+        if incoming_counts[key] <= existing_counts[key]:
             continue
-        seen.add(key)
         new_rows.append(row)
 
     if not new_rows:
@@ -671,12 +673,16 @@ def _transaction_key(row: pd.Series) -> tuple[str, str, str, str, str, str, floa
         str(row.get("process_date") or ""),
         str(row.get("settle_date") or ""),
         str(row.get("symbol") or "").upper().strip(),
-        str(row.get("description") or "").strip(),
+        _canonical_transaction_description(row.get("description")),
         str(row.get("trans_code") or "").strip(),
         _key_number(row.get("quantity")),
         _key_number(row.get("price")),
         _key_number(row.get("amount")),
     )
+
+
+def _canonical_transaction_description(value: object) -> str:
+    return "".join(str(value or "").split()).casefold()
 
 
 def _key_number(value: object) -> float | None:
