@@ -357,6 +357,146 @@ def test_append_robinhood_transactions_adds_unseen_rows_and_skips_duplicates():
     assert result["trans_code"].tolist() == ["Buy", "Sell"]
 
 
+def test_append_robinhood_transactions_preserves_identical_fills_in_initial_report():
+    identical_fills = _transactions(
+        [
+            {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+            {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+        ]
+    )
+
+    result, added_count = append_robinhood_transactions(pd.DataFrame(columns=TRANSACTION_COLUMNS), identical_fills)
+
+    assert added_count == 2
+    assert result[["symbol", "trans_code", "quantity", "price"]].to_dict("records") == [
+        {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+        {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+    ]
+
+
+def test_append_robinhood_transactions_reupload_preserves_identical_fill_count():
+    report = _transactions(
+        [
+            {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+            {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+        ]
+    )
+
+    persisted, first_count = append_robinhood_transactions(pd.DataFrame(columns=TRANSACTION_COLUMNS), report)
+    persisted, second_count = append_robinhood_transactions(persisted, report)
+
+    assert first_count == 2
+    assert second_count == 0
+    assert len(persisted) == 2
+
+
+def test_append_robinhood_transactions_adds_only_missing_identical_occurrences():
+    existing = _transactions(
+        [
+            {
+                "symbol": "BHE",
+                "description": "Benchmark ElectronicsCUSIP: 08160H101",
+                "trans_code": "Sell",
+                "quantity": 2,
+                "price": 85.49,
+            }
+        ]
+    )
+    incoming = _transactions(
+        [
+            {
+                "symbol": "BHE",
+                "description": "Benchmark Electronics\nCUSIP: 08160H101",
+                "trans_code": "Sell",
+                "quantity": 2,
+                "price": 85.49,
+            },
+            {
+                "symbol": "BHE",
+                "description": "Benchmark Electronics\nCUSIP: 08160H101",
+                "trans_code": "Sell",
+                "quantity": 2,
+                "price": 85.49,
+            },
+        ]
+    )
+
+    result, added_count = append_robinhood_transactions(existing, incoming)
+
+    assert added_count == 1
+    assert len(result) == 2
+
+
+def test_append_robinhood_transactions_does_not_remove_excess_stored_occurrences():
+    existing = _transactions(
+        [
+            {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+            {"symbol": "BHE", "trans_code": "Sell", "quantity": 2, "price": 85.49},
+        ]
+    )
+    incoming = existing.iloc[[0]].reset_index(drop=True)
+
+    result, added_count = append_robinhood_transactions(existing, incoming)
+
+    assert added_count == 0
+    assert len(result) == 2
+
+
+def test_identical_bhe_sell_fills_close_the_full_position():
+    report = _transactions(
+        [
+            {
+                "activity_date": "2026-06-02",
+                "process_date": "2026-06-02",
+                "settle_date": "2026-06-03",
+                "symbol": "BHE",
+                "description": "Benchmark Electronics\nCUSIP: 08160H101",
+                "trans_code": "Buy",
+                "quantity": 9,
+                "price": 87.97,
+            },
+            {
+                "activity_date": "2026-06-04",
+                "process_date": "2026-06-04",
+                "settle_date": "2026-06-05",
+                "symbol": "BHE",
+                "description": "Benchmark Electronics\nCUSIP: 08160H101",
+                "trans_code": "Sell",
+                "quantity": 5,
+                "price": 85.49,
+            },
+            {
+                "activity_date": "2026-06-04",
+                "process_date": "2026-06-04",
+                "settle_date": "2026-06-05",
+                "symbol": "BHE",
+                "description": "Benchmark Electronics\nCUSIP: 08160H101",
+                "trans_code": "Sell",
+                "quantity": 2,
+                "price": 85.49,
+            },
+            {
+                "activity_date": "2026-06-04",
+                "process_date": "2026-06-04",
+                "settle_date": "2026-06-05",
+                "symbol": "BHE",
+                "description": "Benchmark Electronics\nCUSIP: 08160H101",
+                "trans_code": "Sell",
+                "quantity": 2,
+                "price": 85.49,
+            },
+        ]
+    )
+
+    persisted, added_count = append_robinhood_transactions(pd.DataFrame(columns=TRANSACTION_COLUMNS), report)
+    derived = derive_fifo_trades(persisted)
+
+    assert added_count == 4
+    assert derived.open_lots.empty
+    assert derived.closed_trades[["symbol", "quantity"]].to_dict("records") == [{"symbol": "BHE", "quantity": 9}]
+    assert derived.exit_matches["quantity"].tolist() == [5, 2, 2]
+
+
 def test_reuploading_same_robinhood_transactions_does_not_double_count_metrics():
     first_upload = _transactions(
         [
