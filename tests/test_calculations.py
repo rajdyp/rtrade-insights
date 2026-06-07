@@ -10,6 +10,7 @@ from stock_calculator.calculations import (
     POSITION_CAMPAIGN_COLUMNS,
     POSITION_SOURCE_COLUMNS,
     PUBLIC_OUTPUT_COLUMNS,
+    ProfitProtectedAddOn,
     RiskNeutralAddOn,
     append_committed_position,
     apply_campaign_overrides,
@@ -17,7 +18,7 @@ from stock_calculator.calculations import (
     campaign_overrides_from_editor,
     campaign_trim_view,
     campaign_view_positions,
-    calculate_campaign_add_on,
+    calculate_profit_protected_add_on,
     calculate_stop_itm,
     calculate_trim_to_free_roll,
     calculate_positions,
@@ -857,9 +858,9 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
             "live_price",
             "trim_count",
             "free_roll",
-            "add_on_shares",
-            "add_on_stop",
-            "add_on_stop_percent",
+            "max_add",
+            "add_risk",
+            "profit_at_stop",
         ]
     ].to_dict("records") == [
         {
@@ -868,9 +869,9 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
             "live_price": "$55.20",
             "trim_count": 6,
             "free_roll": "No",
-            "add_on_shares": 33,
-            "add_on_stop": "$48.33",
-            "add_on_stop_percent": "12.45%",
+            "max_add": 0,
+            "add_risk": "N/A",
+            "profit_at_stop": "N/A",
         },
         {
             "symbol": "SKYT",
@@ -878,14 +879,14 @@ def test_campaign_trim_view_adds_display_only_trim_columns_for_examples():
             "live_price": "$50.00",
             "trim_count": 1,
             "free_roll": "No",
-            "add_on_shares": 5,
-            "add_on_stop": "$40.58",
-            "add_on_stop_percent": "18.84%",
+            "max_add": 0,
+            "add_risk": "N/A",
+            "profit_at_stop": "N/A",
         },
     ]
 
 
-def test_campaign_trim_view_shows_na_for_zero_add_shares():
+def test_campaign_trim_view_shows_na_when_add_is_inapplicable():
     campaigns = pd.DataFrame(
         [
             {
@@ -904,8 +905,8 @@ def test_campaign_trim_view_shows_na_for_zero_add_shares():
 
     result = campaign_trim_view(campaigns, {"NTAP": 173.94})
 
-    assert result[["symbol", "add_on_shares", "add_on_stop", "add_on_stop_percent"]].to_dict("records") == [
-        {"symbol": "NTAP", "add_on_shares": 0, "add_on_stop": "N/A", "add_on_stop_percent": "N/A"}
+    assert result[["symbol", "max_add", "add_risk", "profit_at_stop"]].to_dict("records") == [
+        {"symbol": "NTAP", "max_add": "N/A", "add_risk": "N/A", "profit_at_stop": "N/A"}
     ]
 
 
@@ -929,16 +930,16 @@ def test_campaign_trim_view_shows_placeholder_when_live_price_is_missing():
     result = campaign_trim_view(campaigns, {})
 
     assert result[
-        ["symbol", "stop_itm", "live_price", "trim_count", "add_on_shares", "add_on_stop", "add_on_stop_percent"]
+        ["symbol", "stop_itm", "live_price", "trim_count", "max_add", "add_risk", "profit_at_stop"]
     ].to_dict("records") == [
         {
             "symbol": "SMCI",
             "stop_itm": 0.0,
             "live_price": "-",
             "trim_count": "-",
-            "add_on_shares": "-",
-            "add_on_stop": "-",
-            "add_on_stop_percent": "-",
+            "max_add": "-",
+            "add_risk": "-",
+            "profit_at_stop": "-",
         }
     ]
 
@@ -1041,35 +1042,79 @@ def test_campaign_free_roll_summary_counts_only_normalized_yes_values():
     assert campaign_free_roll_summary(frame) == "Free Roll: 1 / 6 (17%)"
 
 
-def test_calculate_campaign_add_on_uses_half_size_and_new_blended_stop():
-    row = pd.Series({"current_shares": 100, "avg_entry": 100.00})
+def test_calculate_profit_protected_add_on_reproduces_smci_guardrail():
+    row = pd.Series({"current_shares": 18, "avg_entry": 36.03, "campaign_stop": 44.00})
 
-    assert calculate_campaign_add_on(row, 110.00) == (50, 103.33)
+    result = calculate_profit_protected_add_on(row, 48.23, 14.80, preserve_percent=50.0)
 
-
-def test_calculate_campaign_add_on_floors_half_size_for_odd_share_count():
-    row = pd.Series({"current_shares": 101, "avg_entry": 100.00})
-
-    assert calculate_campaign_add_on(row, 110.00) == (50, 103.31)
-
-
-def test_calculate_campaign_add_on_blanks_when_live_price_is_missing():
-    row = pd.Series({"current_shares": 100, "avg_entry": 100.00})
-
-    assert calculate_campaign_add_on(row, None) == (None, None)
+    assert result == ProfitProtectedAddOn(
+        applicable=True,
+        max_add_shares=7,
+        add_risk=29.61,
+        profit_at_stop=128.65,
+    )
 
 
-def test_calculate_campaign_add_on_returns_zero_shares_when_live_price_is_not_above_entry():
-    row = pd.Series({"current_shares": 100, "avg_entry": 100.00})
+def test_calculate_profit_protected_add_on_uses_ftnt_campaign_values():
+    row = pd.Series({"current_shares": 4, "avg_entry": 109.84, "campaign_stop": 137.00})
 
-    assert calculate_campaign_add_on(row, 100.00) == (0, None)
-    assert calculate_campaign_add_on(row, 99.99) == (0, None)
+    result = calculate_profit_protected_add_on(row, 144.71, 38.04, preserve_percent=50.0)
+
+    assert result == ProfitProtectedAddOn(
+        applicable=True,
+        max_add_shares=5,
+        add_risk=38.55,
+        profit_at_stop=108.13,
+    )
 
 
-def test_calculate_campaign_add_on_returns_zero_shares_when_half_size_floors_to_zero():
-    row = pd.Series({"current_shares": 1, "avg_entry": 100.00})
+def test_calculate_profit_protected_add_on_returns_zero_when_floor_has_no_capacity():
+    row = pd.Series({"current_shares": 10, "avg_entry": 100.00, "campaign_stop": 105.00})
 
-    assert calculate_campaign_add_on(row, 110.00) == (0, None)
+    result = calculate_profit_protected_add_on(row, 120.00, preserve_percent=50.0)
+
+    assert result == ProfitProtectedAddOn(
+        applicable=True,
+        max_add_shares=0,
+        add_risk=0.0,
+        profit_at_stop=50.0,
+    )
+
+
+def test_calculate_profit_protected_add_on_is_inapplicable_at_or_below_entry_or_stop():
+    row = pd.Series({"current_shares": 10, "avg_entry": 100.00, "campaign_stop": 95.00})
+
+    assert calculate_profit_protected_add_on(row, 100.00) == ProfitProtectedAddOn(False, 0, 0.0, None)
+
+    stop_above_entry = pd.Series({"current_shares": 10, "avg_entry": 90.00, "campaign_stop": 105.00})
+    assert calculate_profit_protected_add_on(stop_above_entry, 105.00) == ProfitProtectedAddOn(False, 0, 0.0, None)
+
+
+def test_calculate_profit_protected_add_on_requires_price_and_valid_inputs():
+    row = pd.Series({"current_shares": 10, "avg_entry": 100.00, "campaign_stop": 95.00})
+
+    assert calculate_profit_protected_add_on(row, None) is None
+    assert calculate_profit_protected_add_on(row, 110.00, preserve_percent=-1) is None
+    assert calculate_profit_protected_add_on(row, 110.00, preserve_percent=101) is None
+
+
+def test_calculate_profit_protected_add_on_floors_without_breaching_required_floor():
+    row = pd.Series({"current_shares": 18, "avg_entry": 36.03, "campaign_stop": 44.00})
+    live_price = 48.23
+    realized_trim_credit = 14.80
+
+    result = calculate_profit_protected_add_on(
+        row,
+        live_price,
+        realized_trim_credit,
+        preserve_percent=50.0,
+    )
+
+    required_floor = realized_trim_credit + (0.50 * (live_price - 36.03) * 18)
+    assert result is not None
+    assert result.profit_at_stop is not None
+    assert result.profit_at_stop >= required_floor
+    assert result.profit_at_stop - (live_price - 44.00) < required_floor
 
 
 def test_campaign_trim_view_keeps_trim_columns_out_of_campaign_storage_columns():
@@ -1080,17 +1125,17 @@ def test_campaign_trim_view_keeps_trim_columns_out_of_campaign_storage_columns()
             "live_price",
             "trim_count",
             "free_roll",
-            "add_on_shares",
-            "add_on_stop",
-            "add_on_stop_percent",
+            "max_add",
+            "add_risk",
+            "profit_at_stop",
         ]
     )
     assert "live_price" not in CAMPAIGN_OVERRIDE_COLUMNS
     assert "trim_count" not in CAMPAIGN_OVERRIDE_COLUMNS
     assert "free_roll" not in CAMPAIGN_OVERRIDE_COLUMNS
-    assert "add_on_shares" not in CAMPAIGN_OVERRIDE_COLUMNS
-    assert "add_on_stop" not in CAMPAIGN_OVERRIDE_COLUMNS
-    assert "add_on_stop_percent" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "max_add" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "add_risk" not in CAMPAIGN_OVERRIDE_COLUMNS
+    assert "profit_at_stop" not in CAMPAIGN_OVERRIDE_COLUMNS
 
 
 def test_risk_neutral_add_on_triggers_for_single_robinhood_open_lot():

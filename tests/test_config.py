@@ -10,6 +10,7 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path):
         risk_percent=0.5,
         market_regime="GO",
         max_symbol_exposure_percent=20.0,
+        add_on_unrealized_profit_preserve_percent=50.0,
         iex_sizing_price_buffer_percent=0.25,
         iex_sizing_price_buffer_min=0.05,
         iex_sizing_price_buffer_max=0.10,
@@ -26,6 +27,7 @@ sizing_portfolio_amount = 40000.0
 risk_percent = 1.25
 market_regime = "SELECTIVE GO"
 max_symbol_exposure_percent = 15.5
+add_on_unrealized_profit_preserve_percent = 60.0
 iex_sizing_price_buffer_percent = 0.75
 iex_sizing_price_buffer_min = 0.03
 iex_sizing_price_buffer_max = 0.20
@@ -40,6 +42,7 @@ iex_sizing_price_buffer_max = 0.20
     assert config.risk_percent == 1.25
     assert config.market_regime == "SELECTIVE GO"
     assert config.max_symbol_exposure_percent == 15.5
+    assert config.add_on_unrealized_profit_preserve_percent == 60.0
     assert config.iex_sizing_price_buffer_percent == 0.75
     assert config.iex_sizing_price_buffer_min == 0.03
     assert config.iex_sizing_price_buffer_max == 0.20
@@ -72,6 +75,7 @@ portfolio_amount = -1
 sizing_portfolio_amount = -2
 risk_percent = 0.75
 max_symbol_exposure_percent = -4
+add_on_unrealized_profit_preserve_percent = 101
 iex_sizing_price_buffer_percent = -0.5
 iex_sizing_price_buffer_min = 0
 iex_sizing_price_buffer_max = -0.25
@@ -85,6 +89,7 @@ iex_sizing_price_buffer_max = -0.25
     assert config.sizing_portfolio_amount == 20_000.0
     assert config.risk_percent == 0.75
     assert config.max_symbol_exposure_percent == 20.0
+    assert config.add_on_unrealized_profit_preserve_percent == 50.0
     assert config.iex_sizing_price_buffer_percent == 0.25
     assert config.iex_sizing_price_buffer_min == 0.05
     assert config.iex_sizing_price_buffer_max == 0.10
@@ -121,6 +126,7 @@ def test_load_config_falls_back_for_invalid_toml(tmp_path):
         risk_percent=0.5,
         market_regime="GO",
         max_symbol_exposure_percent=20.0,
+        add_on_unrealized_profit_preserve_percent=50.0,
         iex_sizing_price_buffer_percent=0.25,
         iex_sizing_price_buffer_min=0.05,
         iex_sizing_price_buffer_max=0.10,
@@ -140,3 +146,19 @@ market_regime = "BAD"
     config = load_config(path)
 
     assert config.market_regime == "GO"
+
+
+def test_load_config_accepts_add_on_profit_preservation_boundaries(tmp_path):
+    zero_path = tmp_path / "zero.toml"
+    zero_path.write_text(
+        "[defaults]\nadd_on_unrealized_profit_preserve_percent = 0\n",
+        encoding="utf-8",
+    )
+    full_path = tmp_path / "full.toml"
+    full_path.write_text(
+        "[defaults]\nadd_on_unrealized_profit_preserve_percent = 100\n",
+        encoding="utf-8",
+    )
+
+    assert load_config(zero_path).add_on_unrealized_profit_preserve_percent == 0.0
+    assert load_config(full_path).add_on_unrealized_profit_preserve_percent == 100.0

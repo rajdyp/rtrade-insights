@@ -603,9 +603,9 @@ def campaign_view_column_config() -> dict:
         "live_price": st.column_config.TextColumn("Live Price", width=85),
         "trim_count": st.column_config.TextColumn("Trim Count", width=82),
         "free_roll": st.column_config.TextColumn("Free Roll", width=77),
-        "add_on_shares": st.column_config.TextColumn("Add Count", width=85),
-        "add_on_stop": st.column_config.TextColumn("Add Stop", width=80),
-        "add_on_stop_percent": st.column_config.TextColumn("Add Stop %", width=85),
+        "max_add": st.column_config.TextColumn("Max Add", width=78),
+        "add_risk": st.column_config.TextColumn("Add Risk", width=82),
+        "profit_at_stop": st.column_config.TextColumn("Profit at Stop", width=102),
         "strategy": st.column_config.TextColumn("Strategy", width=82),
         "source": st.column_config.TextColumn("Source", width=86),
     }
@@ -667,7 +667,12 @@ def campaign_view_source_frame(positions: pd.DataFrame, planned_stops: pd.DataFr
 
 
 def campaign_view_editor_frame(campaign_view: pd.DataFrame, campaign_trim_credits: pd.DataFrame) -> pd.DataFrame:
-    return campaign_trim_view(campaign_view, st.session_state.get("campaign_live_prices", {}), campaign_trim_credits)
+    return campaign_trim_view(
+        campaign_view,
+        st.session_state.get("campaign_live_prices", {}),
+        campaign_trim_credits,
+        add_on_unrealized_profit_preserve_percent=config.add_on_unrealized_profit_preserve_percent,
+    )
 
 
 def refresh_campaign_live_prices(campaign_view: pd.DataFrame) -> tuple[str, str]:
@@ -1435,7 +1440,12 @@ if not campaign_view.empty:
             hide_index=True,
             key="campaign_view_editor",
         )
-        render_feedback("Campaign View is derived primarily from Robinhood open lots.", "idle")
+        render_feedback(
+            "Campaign View is derived primarily from Robinhood open lots. "
+            f"Max Add keeps the stop and preserves trims plus "
+            f"{format_percent(config.add_on_unrealized_profit_preserve_percent)} of open gain.",
+            "idle",
+        )
         st.session_state.campaign_overrides = campaign_overrides_from_editor(derived_campaign_view, edited_campaigns)
         save_campaign_overrides(st.session_state.campaign_overrides)
 
