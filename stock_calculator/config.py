@@ -11,6 +11,7 @@ DEFAULT_PORTFOLIO_AMOUNT = 20_000.0
 DEFAULT_RISK_PERCENT = 0.5
 DEFAULT_MARKET_REGIME = "GO"
 DEFAULT_MAX_SYMBOL_EXPOSURE_PERCENT = 20.0
+DEFAULT_ADD_ON_UNREALIZED_PROFIT_PRESERVE_PERCENT = 50.0
 DEFAULT_IEX_SIZING_PRICE_BUFFER_PERCENT = 0.25
 DEFAULT_IEX_SIZING_PRICE_BUFFER_MIN = 0.05
 DEFAULT_IEX_SIZING_PRICE_BUFFER_MAX = 0.10
@@ -23,6 +24,7 @@ class AppConfig:
     risk_percent: float = DEFAULT_RISK_PERCENT
     market_regime: str = DEFAULT_MARKET_REGIME
     max_symbol_exposure_percent: float = DEFAULT_MAX_SYMBOL_EXPOSURE_PERCENT
+    add_on_unrealized_profit_preserve_percent: float = DEFAULT_ADD_ON_UNREALIZED_PROFIT_PRESERVE_PERCENT
     iex_sizing_price_buffer_percent: float = DEFAULT_IEX_SIZING_PRICE_BUFFER_PERCENT
     iex_sizing_price_buffer_min: float = DEFAULT_IEX_SIZING_PRICE_BUFFER_MIN
     iex_sizing_price_buffer_max: float = DEFAULT_IEX_SIZING_PRICE_BUFFER_MAX
@@ -53,6 +55,10 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
             defaults.get("max_symbol_exposure_percent"),
             DEFAULT_MAX_SYMBOL_EXPOSURE_PERCENT,
         ),
+        add_on_unrealized_profit_preserve_percent=_bounded_percent(
+            defaults.get("add_on_unrealized_profit_preserve_percent"),
+            DEFAULT_ADD_ON_UNREALIZED_PROFIT_PRESERVE_PERCENT,
+        ),
         iex_sizing_price_buffer_percent=_positive_float(
             defaults.get("iex_sizing_price_buffer_percent"),
             DEFAULT_IEX_SIZING_PRICE_BUFFER_PERCENT,
@@ -82,3 +88,14 @@ def _positive_float(value: Any, fallback: float) -> float:
 def _market_regime(value: Any, fallback: str) -> str:
     regime = str(value or "").strip().upper()
     return regime if regime in {"GO", "SELECTIVE GO", "NO-GO"} else fallback
+
+
+def _bounded_percent(value: Any, fallback: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+    if number < 0 or number > 100:
+        return fallback
+    return number

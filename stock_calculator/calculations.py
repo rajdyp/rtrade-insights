@@ -92,9 +92,9 @@ CAMPAIGN_TRIM_COLUMNS = [
     "live_price",
     "trim_count",
     "free_roll",
-    "add_on_shares",
-    "add_on_stop",
-    "add_on_stop_percent",
+    "max_add",
+    "add_risk",
+    "profit_at_stop",
 ]
 
 CAMPAIGN_TRIM_VIEW_COLUMNS = [
@@ -138,6 +138,14 @@ class RiskNeutralAddOn:
     max_risk_neutral_shares: int
     max_risk_neutral_risk_percent: float | None
     risk_neutral: bool
+
+
+@dataclass(frozen=True)
+class ProfitProtectedAddOn:
+    applicable: bool
+    max_add_shares: int
+    add_risk: float
+    profit_at_stop: float | None
 
 
 def empty_positions(rows: int = 8) -> pd.DataFrame:
@@ -698,6 +706,8 @@ def campaign_trim_view(
     campaigns: pd.DataFrame,
     live_prices: dict[str, float] | None = None,
     campaign_trim_credits: pd.DataFrame | None = None,
+    *,
+    add_on_unrealized_profit_preserve_percent: float = 50.0,
 ) -> pd.DataFrame:
     frame = campaign_view_from_saved(campaigns)
     for column in CAMPAIGN_TRIM_COLUMNS:
@@ -713,18 +723,19 @@ def campaign_trim_view(
         live_price = prices.get(symbol)
         realized_trim_credit = trim_credits.get(symbol, 0.0)
         trim_count, free_roll = calculate_trim_to_free_roll(row, live_price, realized_trim_credit)
-        add_on_shares, add_on_stop = calculate_campaign_add_on(row, live_price)
+        add_on = calculate_profit_protected_add_on(
+            row,
+            live_price,
+            realized_trim_credit,
+            preserve_percent=add_on_unrealized_profit_preserve_percent,
+        )
         frame.loc[index, "stop_itm"] = calculate_stop_itm(row, realized_trim_credit)
         frame.loc[index, "live_price"] = format_currency(live_price) or DISPLAY_PLACEHOLDER
         frame.loc[index, "trim_count"] = _format_display_count(trim_count)
         frame.loc[index, "free_roll"] = "Yes" if free_roll else "No"
-        frame.loc[index, "add_on_shares"] = _format_display_count(add_on_shares)
-        frame.loc[index, "add_on_stop"] = _format_add_on_stop(add_on_shares, add_on_stop)
-        frame.loc[index, "add_on_stop_percent"] = _format_add_on_stop_percent(
-            add_on_shares,
-            add_on_stop,
-            live_price,
-        )
+        frame.loc[index, "max_add"] = _format_add_on_count(add_on)
+        frame.loc[index, "add_risk"] = _format_add_on_currency(add_on, "add_risk")
+        frame.loc[index, "profit_at_stop"] = _format_add_on_currency(add_on, "profit_at_stop")
 
     return frame[CAMPAIGN_TRIM_VIEW_COLUMNS]
 
@@ -834,43 +845,66 @@ def _campaign_trim_credit_by_symbol(campaign_trim_credits: pd.DataFrame | None) 
     }
 
 
-def calculate_campaign_add_on(row: pd.Series, live_price: Any) -> tuple[int | None, float | None]:
+def calculate_profit_protected_add_on(
+    row: pd.Series,
+    live_price: Any,
+    realized_trim_credit: Any = 0,
+    *,
+    preserve_percent: float = 50.0,
+) -> ProfitProtectedAddOn | None:
     current_shares = _to_float(row.get("current_shares"))
     avg_entry = _to_float(row.get("avg_entry"))
+    campaign_stop = _to_float(row.get("campaign_stop"))
     live_price = _to_float(live_price)
+    realized_trim_credit = _to_float(realized_trim_credit) or 0.0
+    preserve_percent = _to_float(preserve_percent)
 
-    if current_shares is None or avg_entry is None or current_shares <= 0:
-        return None, None
-
+    if (
+        current_shares is None
+        or avg_entry is None
+        or campaign_stop is None
+        or current_shares <= 0
+        or preserve_percent is None
+        or preserve_percent < 0
+        or preserve_percent > 100
+    ):
+        return None
     if live_price is None:
-        return None, None
+        return None
+    if live_price <= avg_entry or live_price <= campaign_stop:
+        return ProfitProtectedAddOn(False, 0, 0.0, None)
 
-    add_on_shares = math.floor(current_shares * 0.50)
-    if live_price <= avg_entry or add_on_shares <= 0:
-        return 0, None
+    unrealized_profit = max(0.0, (live_price - avg_entry) * current_shares)
+    required_floor = realized_trim_credit + ((preserve_percent / 100) * unrealized_profit)
+    current_floor = realized_trim_credit + ((campaign_stop - avg_entry) * current_shares)
+    available_add_risk = max(0.0, current_floor - required_floor)
+    risk_per_add_share = live_price - campaign_stop
+    max_add_shares = math.floor(available_add_risk / risk_per_add_share)
+    add_risk = max_add_shares * risk_per_add_share
+    profit_at_stop = current_floor - add_risk
+    return ProfitProtectedAddOn(
+        applicable=True,
+        max_add_shares=max_add_shares,
+        add_risk=round(add_risk, 2),
+        profit_at_stop=round(profit_at_stop, 2),
+    )
 
-    combined_shares = current_shares + add_on_shares
-    add_on_stop = ((avg_entry * current_shares) + (live_price * add_on_shares)) / combined_shares
-    return add_on_shares, round(add_on_stop, 2)
 
-
-def _format_add_on_stop(add_on_shares: int | None, add_on_stop: float | None) -> str | None:
-    if add_on_shares == 0:
-        return "N/A"
-    return format_currency(add_on_stop) or DISPLAY_PLACEHOLDER
-
-
-def _format_add_on_stop_percent(
-    add_on_shares: int | None,
-    add_on_stop: float | None,
-    live_price: Any,
-) -> str | None:
-    live_price = _to_float(live_price)
-    if add_on_shares == 0:
-        return "N/A"
-    if add_on_stop is None or live_price is None or live_price <= 0:
+def _format_add_on_count(add_on: ProfitProtectedAddOn | None) -> int | str:
+    if add_on is None:
         return DISPLAY_PLACEHOLDER
-    return format_percent(((live_price - add_on_stop) / live_price) * 100)
+    if not add_on.applicable:
+        return "N/A"
+    return add_on.max_add_shares
+
+
+def _format_add_on_currency(add_on: ProfitProtectedAddOn | None, field: str) -> str:
+    if add_on is None:
+        return DISPLAY_PLACEHOLDER
+    if not add_on.applicable or add_on.max_add_shares == 0:
+        return "N/A"
+    value = getattr(add_on, field)
+    return format_currency(value) or DISPLAY_PLACEHOLDER
 
 
 def _format_display_count(value: int | None) -> int | str:
