@@ -169,6 +169,9 @@ PINS 21.16 20.69 5.2
 
 EP
 NVDA 100 95 5
+
+Pullback
+AAPL 200 195 4.5
 ```
 
 Use `--format csv` or `--format json` for machine-readable output.
