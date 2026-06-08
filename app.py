@@ -604,10 +604,8 @@ def campaign_view_column_config() -> dict:
         "trim_count": st.column_config.TextColumn("Trim Count", width=82),
         "free_roll": st.column_config.TextColumn("Free Roll", width=77),
         "max_add": st.column_config.TextColumn("Max Add", width=78),
-        "add_risk": st.column_config.TextColumn("Add Risk", width=82),
-        "profit_at_stop": st.column_config.TextColumn("Profit at Stop", width=102),
-        "strategy": st.column_config.TextColumn("Strategy", width=82),
-        "source": st.column_config.TextColumn("Source", width=86),
+        "add_risk": st.column_config.TextColumn("Add Risk", width=78),
+        "profit_at_stop": st.column_config.TextColumn("Profit at Stop", width=100),
     }
 
 
