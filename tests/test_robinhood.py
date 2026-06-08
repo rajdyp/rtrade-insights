@@ -111,6 +111,39 @@ def test_derive_fifo_trades_matches_full_sell_with_planned_stop():
     assert result.missing_planned_stops == 0
 
 
+def test_pullback_strategy_flows_through_fifo_metrics_and_attribution():
+    transactions = pd.DataFrame(
+        [
+            {"activity_date": "2026-04-15", "symbol": "AAPL", "trans_code": "Buy", "quantity": 2, "price": 200},
+            {"activity_date": "2026-04-16", "symbol": "AAPL", "trans_code": "Sell", "quantity": 2, "price": 210},
+        ]
+    )
+    planned = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-15",
+                "quantity": 2,
+                "planned_stop": 195,
+                "strategy": "Pullback",
+                "atr": 4.5,
+                "market_regime": "GO",
+            }
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+
+    result = derive_fifo_trades(transactions, planned)
+    metrics = calculate_strategy_metrics(result.closed_trades)
+    attribution = calculate_strategy_attribution(result.closed_trades)
+
+    assert result.closed_trades["strategy"].tolist() == ["Pullback"]
+    assert metrics["strategy"].tolist() == ["Pullback"]
+    assert metrics.iloc[0]["trade_count"] == 1
+    assert attribution["strategy"].tolist() == ["Pullback"]
+    assert attribution.iloc[0]["mode"] == "Unknown"
+
+
 def test_derive_fifo_trades_carries_planned_atr_and_market_regime_into_closed_trades_and_open_lots():
     transactions = pd.DataFrame(
         [

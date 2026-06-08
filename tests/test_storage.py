@@ -250,7 +250,7 @@ def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
                     "buy_date": "2026-04-01",
                     "quantity": "2",
                     "planned_stop": "190.50",
-                    "strategy": "EP",
+                    "strategy": "Pullback",
                     "atr": "4.25",
                     "market_regime": "selective go",
                 }
@@ -265,7 +265,7 @@ def test_save_and_load_planned_stops_preserves_cleaned_columns(tmp_path):
     assert loaded["symbol"].tolist() == ["AAPL"]
     assert loaded["quantity"].tolist() == [2.0]
     assert loaded["planned_stop"].tolist() == [190.50]
-    assert loaded["strategy"].tolist() == ["EP"]
+    assert loaded["strategy"].tolist() == ["Pullback"]
     assert loaded["atr"].tolist() == [4.25]
     assert loaded["market_regime"].tolist() == ["SELECTIVE GO"]
 

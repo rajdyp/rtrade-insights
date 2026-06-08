@@ -43,6 +43,7 @@ def test_rank_endpoint_returns_json():
     assert payload["groups"]["EP"][0]["symbol"] == "TEST"
     assert payload["groups"]["4% BO"] == []
     assert payload["groups"]["BO"] == []
+    assert payload["groups"]["Pullback"] == []
 
 
 def test_rank_endpoint_rejects_invalid_format():

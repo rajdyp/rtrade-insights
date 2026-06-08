@@ -27,7 +27,7 @@ ROBINHOOD_COLUMNS = [
 ]
 
 TRADE_CODES = {"Buy", "Sell"}
-STRATEGY_OPTIONS = ["EP", "4% BO", "BO"]
+STRATEGY_OPTIONS = ["EP", "4% BO", "BO", "Pullback"]
 UNCLASSIFIED_STRATEGY = "Unclassified"
 
 TRANSACTION_COLUMNS = [
