@@ -668,6 +668,8 @@ def test_google_sheets_empty_sheet_returns_normalized_empty_frame_and_header():
     assert loaded.empty
     assert loaded.columns.tolist() == POSITION_SOURCE_COLUMNS
     assert worksheet.values == [POSITION_SOURCE_COLUMNS]
+    assert worksheet.clear_calls == 0
+    assert worksheet.update_calls == 1
 
 
 def test_google_sheets_save_writes_headers_and_normalized_rows():
@@ -684,6 +686,49 @@ def test_google_sheets_save_writes_headers_and_normalized_rows():
         PLANNED_STOP_COLUMNS,
         ["AAPL", "2026-04-01", 2.0, 190.5, "EP", "", ""],
     ]
+    assert worksheet.clear_calls == 0
+    assert worksheet.update_calls == 1
+
+
+def test_google_sheets_save_blanks_trailing_rows_in_same_update():
+    worksheet = FakeWorksheet(
+        [
+            PLANNED_STOP_COLUMNS,
+            ["AAPL", "2026-04-01", 2, 190.5, "EP", "", ""],
+            ["MSFT", "2026-04-02", 1, 400, "BO", "", ""],
+        ]
+    )
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"planned_stops": worksheet}))
+
+    backend.save_planned_stops(
+        pd.DataFrame(
+            [{"symbol": "AAPL", "buy_date": "2026-04-01", "quantity": 2, "planned_stop": 190.5, "strategy": "EP"}]
+        )
+    )
+
+    assert worksheet.clear_calls == 0
+    assert worksheet.update_calls == 1
+    assert worksheet.values == [
+        PLANNED_STOP_COLUMNS,
+        ["AAPL", "2026-04-01", 2, 190.5, "EP", "", ""],
+        ["", "", "", "", "", "", ""],
+    ]
+
+
+def test_google_sheets_failed_save_preserves_existing_rows():
+    existing = [
+        PLANNED_STOP_COLUMNS,
+        ["AAPL", "2026-04-01", 2, 190.5, "EP", "", ""],
+    ]
+    worksheet = FakeWorksheet(existing)
+    worksheet.update_error = RuntimeError("quota exceeded")
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"planned_stops": worksheet}))
+
+    with pytest.raises(RuntimeError, match="quota exceeded"):
+        backend.save_planned_stops(pd.DataFrame(columns=PLANNED_STOP_COLUMNS))
+
+    assert worksheet.clear_calls == 0
+    assert worksheet.values == existing
 
 
 def test_google_sheets_positions_archive_is_created_and_normalized():
@@ -706,6 +751,7 @@ def test_google_sheets_positions_archive_is_created_and_normalized():
 
     assert spreadsheet.worksheets["positions_archive"].values[0] == POSITION_ARCHIVE_COLUMNS
     assert spreadsheet.worksheets["positions_archive"].values[1][1:5] == ["AAPL", "2026-04-01", 100, 95]
+    assert spreadsheet.worksheets["positions_archive"].clear_calls == 0
 
 
 def test_google_sheets_campaign_overrides_is_created_and_normalized():
@@ -801,6 +847,48 @@ def test_google_sheets_planned_stop_upsert_replaces_by_symbol_date_and_quantity(
     ]
 
 
+def test_planned_stop_upsert_preserves_order_when_row_is_unchanged():
+    planned_stops = pd.DataFrame(
+        [
+            {
+                "symbol": "MSFT",
+                "buy_date": "2026-04-02",
+                "quantity": 1,
+                "planned_stop": 400,
+                "strategy": "BO",
+                "atr": 3.5,
+                "market_regime": "GO",
+            },
+            {
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "quantity": 2,
+                "planned_stop": 190.5,
+                "strategy": "EP",
+                "atr": 4.25,
+                "market_regime": "SELECTIVE GO",
+            },
+        ],
+        columns=PLANNED_STOP_COLUMNS,
+    )
+    calculated_position = pd.Series(
+        {
+            "symbol": "AAPL",
+            "buy_date": "2026-04-01",
+            "number_of_shares": 2.0,
+            "stop_price": 190.5,
+            "strategy": "EP",
+            "atr": 4.25,
+            "market_regime": "SELECTIVE GO",
+        }
+    )
+
+    updated = upsert_planned_stop(planned_stops, calculated_position)
+
+    assert updated["symbol"].tolist() == ["MSFT", "AAPL"]
+    pd.testing.assert_frame_equal(updated, planned_stops)
+
+
 class WorksheetNotFound(Exception):
     pass
 
@@ -808,14 +896,22 @@ class WorksheetNotFound(Exception):
 class FakeWorksheet:
     def __init__(self, values: list[list[object]]):
         self.values = values
+        self.row_count = max(1, len(values))
+        self.clear_calls = 0
+        self.update_calls = 0
+        self.update_error: Exception | None = None
 
     def get_all_values(self):
         return self.values
 
     def clear(self):
+        self.clear_calls += 1
         self.values = []
 
     def update(self, values, value_input_option=None):
+        self.update_calls += 1
+        if self.update_error is not None:
+            raise self.update_error
         self.values = values
 
 

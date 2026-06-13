@@ -31,6 +31,7 @@ from stock_calculator.calculations import (
 )
 from stock_calculator.alpaca import AlpacaMarketDataClient
 from stock_calculator.config import load_config
+from stock_calculator.persistence import frames_equal, rows_for_ids, save_if_changed
 from stock_calculator.robinhood import (
     STRATEGY_OPTIONS,
     UNCLASSIFIED_STRATEGY,
@@ -66,6 +67,7 @@ from stock_calculator.strategy_attribution_display import (
     strategy_attribution_strategy_frame,
 )
 from stock_calculator.storage import (
+    POSITION_ARCHIVE_COLUMNS,
     StorageError,
     append_robinhood_transactions,
     get_storage_backend,
@@ -115,6 +117,7 @@ ROBINHOOD_TABLE_HEADER_HEIGHT = 36
 ROBINHOOD_TABLE_ROW_HEIGHT = 35
 ROBINHOOD_TABLE_BORDER_ALLOWANCE = 3
 ROBINHOOD_TABLE_MAX_VISIBLE_ROWS = 10
+LAST_ARCHIVED_INPUT_KEY = "last_archived_positions_input"
 
 
 def apply_styles() -> None:
@@ -722,6 +725,27 @@ def edited_position_strategies(edited: pd.DataFrame) -> list[str]:
     return [normalize_strategy(strategy) for strategy in edited_positions.get("strategy", [])]
 
 
+def initialize_persisted_frame(state_key: str, loader) -> None:
+    snapshot_key = f"last_saved_{state_key}"
+    if state_key not in st.session_state:
+        loaded = loader()
+        st.session_state[state_key] = loaded
+        st.session_state[snapshot_key] = loaded.copy(deep=True)
+    elif snapshot_key not in st.session_state:
+        st.session_state[snapshot_key] = loader().copy(deep=True)
+
+
+def persist_session_frame(state_key: str, save) -> bool:
+    snapshot_key = f"last_saved_{state_key}"
+    snapshot, saved = save_if_changed(
+        st.session_state[state_key],
+        st.session_state[snapshot_key],
+        save,
+    )
+    st.session_state[snapshot_key] = snapshot
+    return saved
+
+
 def upsert_position_strategies(
     planned_stops: pd.DataFrame,
     calculated_positions: pd.DataFrame,
@@ -736,9 +760,9 @@ def upsert_position_strategies(
     return updated
 
 
-def archive_positions_snapshot(positions: pd.DataFrame, strategies: list[str] | None = None) -> None:
+def archive_input_frame(positions: pd.DataFrame, strategies: list[str] | None = None) -> pd.DataFrame:
     if positions.empty:
-        return
+        return pd.DataFrame(columns=POSITION_ARCHIVE_COLUMNS)
 
     archive_frame = positions.copy()
     if strategies is not None:
@@ -754,11 +778,36 @@ def archive_positions_snapshot(positions: pd.DataFrame, strategies: list[str] | 
             planned_strategy(row, st.session_state.planned_stops) for _, row in archive_frame.iterrows()
         ]
 
-    st.session_state.positions_archive = upsert_positions_archive(
+    for column in POSITION_ARCHIVE_COLUMNS:
+        if column not in archive_frame.columns:
+            archive_frame[column] = None
+    return archive_frame[POSITION_ARCHIVE_COLUMNS].reset_index(drop=True)
+
+
+def archived_input_for_active_positions(archive: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:
+    active_ids = positions[POSITION_ID_COLUMN].fillna("").astype(str).tolist()
+    return rows_for_ids(
+        archive,
+        active_ids,
+        id_column=POSITION_ID_COLUMN,
+        columns=POSITION_ARCHIVE_COLUMNS,
+    )
+
+
+def archive_positions_snapshot(positions: pd.DataFrame, strategies: list[str] | None = None) -> bool:
+    archive_frame = archive_input_frame(positions, strategies)
+    if archive_frame.empty or frames_equal(archive_frame, st.session_state[LAST_ARCHIVED_INPUT_KEY]):
+        return False
+
+    updated_archive = upsert_positions_archive(
         st.session_state.positions_archive,
         archive_frame,
     )
-    save_positions_archive(st.session_state.positions_archive)
+    save_positions_archive(updated_archive)
+    st.session_state.positions_archive = updated_archive
+    st.session_state.last_saved_positions_archive = updated_archive.copy(deep=True)
+    st.session_state[LAST_ARCHIVED_INPUT_KEY] = archive_frame.copy(deep=True)
+    return True
 
 
 def existing_planned_market_regime(row: pd.Series, planned_stops: pd.DataFrame) -> str:
@@ -1130,11 +1179,10 @@ def add_current_draft() -> None:
         st.session_state.get("draft_market_regime")
     )
     st.session_state.planned_stops = upsert_planned_stop(st.session_state.planned_stops, calculated_draft.iloc[0])
-    save_positions(st.session_state.positions)
-    save_planned_stops(st.session_state.planned_stops)
-    archive_row = calculate_positions(st.session_state.positions.iloc[[0]])
-    archive_row.loc[archive_row.index[0], "strategy"] = st.session_state.get("draft_strategy", STRATEGY_OPTIONS[0])
-    archive_positions_snapshot(archive_row)
+    persist_session_frame("positions", save_positions)
+    persist_session_frame("planned_stops", save_planned_stops)
+    calculated_positions = calculate_positions(st.session_state.positions)
+    archive_positions_snapshot(calculated_positions)
     st.session_state.draft_symbol = ""
     st.session_state.draft_buy_date = date.today()
     st.session_state.draft_share_price = 0.0
@@ -1150,21 +1198,20 @@ def delete_selected_positions(selected_rows: list[int]) -> None:
         return
 
     st.session_state.positions = delete_positions_by_index(st.session_state.positions, selected_rows)
-    save_positions(st.session_state.positions)
+    persist_session_frame("positions", save_positions)
+    st.session_state[LAST_ARCHIVED_INPUT_KEY] = archived_input_for_active_positions(
+        st.session_state[LAST_ARCHIVED_INPUT_KEY],
+        st.session_state.positions,
+    )
     st.session_state.position_editor_revision += 1
     st.rerun()
 
 
-if "positions" not in st.session_state:
-    st.session_state.positions = load_positions()
-if "positions_archive" not in st.session_state:
-    st.session_state.positions_archive = load_positions_archive()
-if "campaign_overrides" not in st.session_state:
-    st.session_state.campaign_overrides = load_campaign_overrides()
-if "planned_stops" not in st.session_state:
-    st.session_state.planned_stops = load_planned_stops()
-if "robinhood_transactions" not in st.session_state:
-    st.session_state.robinhood_transactions = load_robinhood_transactions()
+initialize_persisted_frame("positions", load_positions)
+initialize_persisted_frame("positions_archive", load_positions_archive)
+initialize_persisted_frame("campaign_overrides", load_campaign_overrides)
+initialize_persisted_frame("planned_stops", load_planned_stops)
+initialize_persisted_frame("robinhood_transactions", load_robinhood_transactions)
 if "draft_symbol" not in st.session_state:
     st.session_state.draft_symbol = ""
 if "draft_buy_date" not in st.session_state:
@@ -1224,6 +1271,11 @@ render_header_metrics(total_pnl, trade_metrics, header_container)
 
 calculated = calculate_positions(st.session_state.positions)
 visible_calculated = filtered_output(calculated)
+if LAST_ARCHIVED_INPUT_KEY not in st.session_state:
+    st.session_state[LAST_ARCHIVED_INPUT_KEY] = archived_input_for_active_positions(
+        st.session_state.positions_archive,
+        visible_calculated,
+    )
 
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
@@ -1396,14 +1448,14 @@ else:
     if delete_rows:
         delete_selected_positions(delete_rows)
 
-    save_positions(st.session_state.positions)
+    persist_session_frame("positions", save_positions)
     visible_calculated = filtered_output(calculate_positions(st.session_state.positions))
     st.session_state.planned_stops = upsert_position_strategies(
         st.session_state.planned_stops,
         visible_calculated,
         strategy_values,
     )
-    save_planned_stops(st.session_state.planned_stops)
+    persist_session_frame("planned_stops", save_planned_stops)
     archive_positions_snapshot(visible_calculated, strategy_values)
     invalid_positions = int((visible_calculated["validation_error"].fillna("") != "").sum())
 
@@ -1445,7 +1497,7 @@ if not campaign_view.empty:
             "idle",
         )
         st.session_state.campaign_overrides = campaign_overrides_from_editor(derived_campaign_view, edited_campaigns)
-        save_campaign_overrides(st.session_state.campaign_overrides)
+        persist_session_frame("campaign_overrides", save_campaign_overrides)
 
 if invalid_positions:
     invalid_rows = visible_calculated[visible_calculated["validation_error"].fillna("") != ""]
@@ -1474,9 +1526,9 @@ with st.expander("Robinhood Import", expanded=False):
             import_result.transactions,
         )
         skipped_count = len(import_result.transactions) - added_count
-        if added_count:
-            save_robinhood_transactions(persisted_transactions)
         st.session_state.robinhood_transactions = persisted_transactions
+        if added_count:
+            persist_session_frame("robinhood_transactions", save_robinhood_transactions)
         st.session_state.robinhood_last_added_count = added_count
         st.session_state.robinhood_last_skipped_count = skipped_count
         robinhood_derivation = derive_fifo_trades(st.session_state.robinhood_transactions, st.session_state.planned_stops)

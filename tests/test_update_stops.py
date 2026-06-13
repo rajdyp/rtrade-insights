@@ -156,6 +156,7 @@ class WorksheetNotFound(Exception):
 class FakeWorksheet:
     def __init__(self, values):
         self.values = values
+        self.row_count = max(1, len(values))
 
     def get_all_values(self):
         return self.values
