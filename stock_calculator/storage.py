@@ -18,6 +18,7 @@ from stock_calculator.calculations import (
     normalize_input_frame,
     normalize_position_campaigns,
 )
+from stock_calculator.persistence import frames_equal
 from stock_calculator.risk import normalize_market_regime
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, normalize_strategy
 
@@ -248,8 +249,10 @@ class GoogleSheetsStorage:
 
     def _write_table(self, title: str, df: pd.DataFrame, columns: list[str]) -> None:
         worksheet = self._worksheet(title, columns)
-        worksheet.clear()
-        worksheet.update(_worksheet_values(df, columns), value_input_option="USER_ENTERED")
+        values = _worksheet_values(df, columns)
+        row_count = max(len(values), int(worksheet.row_count))
+        values.extend([[""] * len(columns) for _ in range(row_count - len(values))])
+        worksheet.update(values, value_input_option="USER_ENTERED")
 
     def _worksheet(self, title: str, columns: list[str]) -> Any:
         try:
@@ -267,7 +270,6 @@ class GoogleSheetsStorage:
 
     @staticmethod
     def _write_headers(worksheet: Any, columns: list[str]) -> None:
-        worksheet.clear()
         worksheet.update([columns], value_input_option="USER_ENTERED")
 
 
@@ -488,6 +490,11 @@ def upsert_planned_stop(planned_stops: pd.DataFrame, calculated_position: pd.Ser
     if not row.get("market_regime"):
         row["market_regime"] = _planned_market_regime_for_key(normalized, key)
     keep_rows = [_planned_stop_key(existing) != key for _, existing in normalized.iterrows()]
+    matching = normalized.loc[[not keep for keep in keep_rows]].reset_index(drop=True)
+    replacement = _normalize_planned_stops(pd.DataFrame([row]))
+    if len(matching) == 1 and frames_equal(matching, replacement):
+        return normalized
+
     updated = pd.concat([pd.DataFrame([row]), normalized.loc[keep_rows]], ignore_index=True)
     return _normalize_planned_stops(updated)
 
