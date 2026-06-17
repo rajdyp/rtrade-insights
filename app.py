@@ -29,7 +29,11 @@ from stock_calculator.calculations import (
     risk_neutral_add_on_message,
     symbol_exposure_breaches,
 )
-from stock_calculator.alpaca import AlpacaMarketDataClient
+from stock_calculator.campaign_prices import (
+    CAMPAIGN_PRICE_SOURCES,
+    DEFAULT_CAMPAIGN_PRICE_SOURCE,
+    get_campaign_live_prices,
+)
 from stock_calculator.config import load_config
 from stock_calculator.persistence import frames_equal, rows_for_ids, save_if_changed
 from stock_calculator.robinhood import (
@@ -111,7 +115,6 @@ POSITION_EDITOR_COLUMNS = [
 ]
 EDITABLE_POSITION_COLUMNS = [*INPUT_COLUMNS, "strategy"]
 EDITABLE_CAMPAIGN_VIEW_COLUMNS = ["current_shares", "campaign_stop"]
-CAMPAIGN_PRICE_FEED = "iex"
 POSITIONS_TABLE_MIN_VISIBLE_ROWS = 5
 ROBINHOOD_TABLE_HEADER_HEIGHT = 36
 ROBINHOOD_TABLE_ROW_HEIGHT = 35
@@ -676,7 +679,7 @@ def campaign_view_editor_frame(campaign_view: pd.DataFrame, campaign_trim_credit
     )
 
 
-def refresh_campaign_live_prices(campaign_view: pd.DataFrame) -> tuple[str, str]:
+def refresh_campaign_live_prices(campaign_view: pd.DataFrame, source: str) -> tuple[str, str]:
     symbols = [
         str(symbol or "").upper().strip()
         for symbol in campaign_view.get("symbol", pd.Series(dtype=object)).tolist()
@@ -684,19 +687,14 @@ def refresh_campaign_live_prices(campaign_view: pd.DataFrame) -> tuple[str, str]
     ]
     if not symbols:
         st.session_state.campaign_live_prices = {}
-        return "No campaign symbols are available for Alpaca refresh.", "idle"
+        return "No campaign symbols are available for price refresh.", "idle"
 
-    data = AlpacaMarketDataClient.from_env().get_market_data(symbols, feed=CAMPAIGN_PRICE_FEED)
-    prices = {
-        symbol: row.price
-        for symbol, row in data.items()
-        if row.price is not None
-    }
+    prices = get_campaign_live_prices(symbols, source)
     st.session_state.campaign_live_prices = prices
     missing_count = len(set(symbols) - set(prices))
     if missing_count:
-        return f"Updated Alpaca prices for {len(prices)} symbol(s); {missing_count} missing.", "warning"
-    return f"Updated Alpaca prices for {len(prices)} symbol(s).", "ready"
+        return f"Updated {source} prices for {len(prices)} symbol(s); {missing_count} missing.", "warning"
+    return f"Updated {source} prices for {len(prices)} symbol(s).", "ready"
 
 
 def planned_strategy(row: pd.Series, planned_stops: pd.DataFrame) -> str:
@@ -1236,6 +1234,8 @@ if "position_editor_revision" not in st.session_state:
     st.session_state.position_editor_revision = 0
 if "campaign_live_prices" not in st.session_state:
     st.session_state.campaign_live_prices = {}
+if "campaign_price_source" not in st.session_state:
+    st.session_state.campaign_price_source = DEFAULT_CAMPAIGN_PRICE_SOURCE
 if "campaign_price_feedback" not in st.session_state:
     st.session_state.campaign_price_feedback = None
 
@@ -1464,15 +1464,26 @@ derived_campaign_view = campaign_view_positions(robinhood_derivation.open_lots, 
 campaign_view = apply_campaign_overrides(derived_campaign_view, st.session_state.campaign_overrides)
 if not campaign_view.empty:
     with st.expander("Campaign View", expanded=False):
-        campaign_action_cols = st.columns([1, 3])
+        campaign_action_cols = st.columns([1.15, 1, 2.85], vertical_alignment="center")
         with campaign_action_cols[0]:
-            if st.button("Refresh Alpaca Prices", width="stretch"):
+            st.radio(
+                "Price Source",
+                CAMPAIGN_PRICE_SOURCES,
+                key="campaign_price_source",
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+        with campaign_action_cols[1]:
+            if st.button("Refresh Prices", width="stretch"):
                 try:
-                    st.session_state.campaign_price_feedback = refresh_campaign_live_prices(campaign_view)
+                    st.session_state.campaign_price_feedback = refresh_campaign_live_prices(
+                        campaign_view,
+                        st.session_state.campaign_price_source,
+                    )
                 except ValueError as exc:
                     st.session_state.campaign_price_feedback = (str(exc), "error")
         campaign_editor_frame = campaign_view_editor_frame(campaign_view, robinhood_derivation.campaign_trim_credits)
-        with campaign_action_cols[1]:
+        with campaign_action_cols[2]:
             st.markdown(
                 f"<div style='text-align: right;'>{escape(campaign_free_roll_summary(campaign_editor_frame))}</div>",
                 unsafe_allow_html=True,

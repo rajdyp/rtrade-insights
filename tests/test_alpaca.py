@@ -36,6 +36,18 @@ def test_alpaca_client_maps_delayed_sip_to_sip_for_historical_daily_bars():
     assert [call["params"]["feed"] for call in session.calls] == ["delayed_sip", "sip"]
 
 
+def test_alpaca_client_latest_prices_fetches_snapshots_only():
+    session = FakeSession()
+    client = AlpacaMarketDataClient("key", "secret", session=session)
+
+    prices = client.get_latest_prices(["test"], feed="iex")
+
+    assert prices == {"TEST": 100.0}
+    assert len(session.calls) == 1
+    assert session.calls[0]["url"].endswith("/stocks/snapshots")
+    assert session.calls[0]["params"]["feed"] == "iex"
+
+
 def test_atr_percent_uses_marketsurge_style_daily_range_percent_not_true_range_over_price():
     bars = [{"h": 100.0, "l": 100.0, "c": 100.0, "t": "2026-04-01T00:00:00Z"}]
     for index in range(21):

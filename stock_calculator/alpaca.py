@@ -85,6 +85,21 @@ class AlpacaMarketDataClient:
             )
         return result
 
+    def get_latest_prices(self, symbols: list[str], *, feed: str = "iex") -> dict[str, float]:
+        normalized_symbols = _normalize_symbols(symbols)
+        if not normalized_symbols:
+            return {}
+        if feed not in SUPPORTED_FEEDS:
+            raise ValueError(f"Unsupported Alpaca feed: {feed}. Use iex, delayed_sip, or sip.")
+
+        snapshots = self._get_snapshots(normalized_symbols, feed)
+        prices: dict[str, float] = {}
+        for symbol in normalized_symbols:
+            price, _ = _snapshot_price(snapshots.get(symbol, {}))
+            if price is not None:
+                prices[symbol] = price
+        return prices
+
     def _get_snapshots(self, symbols: list[str], feed: str) -> dict[str, dict[str, Any]]:
         payload = self._request(
             "/stocks/snapshots",
