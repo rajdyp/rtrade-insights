@@ -68,6 +68,9 @@ CLOSED_TRADE_COLUMNS = [
     "realized_pnl",
     "realized_pnl_percent",
     "hold_days",
+    "num_buy_fills",
+    "is_pyramided",
+    "entry_feature_basis",
 ]
 
 OPEN_LOT_COLUMNS = [
@@ -1076,8 +1079,10 @@ def derive_fifo_trades(
                     "atr": lot_match["atr"],
                     "market_regime": lot_match["market_regime"],
                     "exit_matches": [],
+                    "num_buy_fills": 0,
                     "closed": False,
                 }
+            trade_groups[logical_trade_id]["num_buy_fills"] += 1
             lots[symbol].append(
                 {
                     "symbol": symbol,
@@ -1127,6 +1132,9 @@ def derive_fifo_trades(
                 "realized_pnl": realized_pnl,
                 "realized_pnl_percent": realized_pnl_percent,
                 "hold_days": weekday_hold_count(lot["buy_date"], as_of=_to_date(sell_date)),
+                "num_buy_fills": 1,
+                "is_pyramided": False,
+                "entry_feature_basis": "single_buy_prior_bar",
             }
             exit_matches.append(exit_match)
             lot["exit_matches"].append(exit_match)
@@ -1222,6 +1230,8 @@ def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
     buy_price = round(buy_amount / quantity, 2) if quantity else None
     sell_price = round(sell_amount / quantity, 2) if quantity else None
     sell_date = max(str(match["sell_date"]) for match in matches)
+    num_buy_fills = int(lot.get("num_buy_fills") or 0)
+    is_pyramided = num_buy_fills > 1
 
     return {
         "symbol": lot["symbol"],
@@ -1239,6 +1249,9 @@ def _aggregate_closed_trade(lot: dict[str, Any]) -> dict[str, Any]:
         "realized_pnl": realized_pnl,
         "realized_pnl_percent": realized_pnl_percent,
         "hold_days": weekday_hold_count(lot["buy_date"], as_of=_to_date(sell_date)),
+        "num_buy_fills": num_buy_fills,
+        "is_pyramided": is_pyramided,
+        "entry_feature_basis": "avg_cost_first_date_prior_bar" if is_pyramided else "single_buy_prior_bar",
     }
 
 

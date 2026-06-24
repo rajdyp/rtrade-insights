@@ -363,6 +363,9 @@ def test_derive_fifo_trades_groups_same_price_split_buys_into_one_logical_closed
     assert row["buy_amount"] == 588.80
     assert row["sell_amount"] == 640.00
     assert row["realized_pnl"] == 51.20
+    assert row["num_buy_fills"] == 3
+    assert bool(row["is_pyramided"]) is True
+    assert row["entry_feature_basis"] == "avg_cost_first_date_prior_bar"
     assert metrics["trade_count"] == 1
     assert metrics["win_count"] == 1
     assert result.missing_planned_stops == 0
