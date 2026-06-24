@@ -12,6 +12,12 @@ from stock_calculator.research import (
     open_research_tabs,
     read_ticker_file,
 )
+from stock_calculator.trade_analysis import (
+    DEFAULT_BIGQUERY_DATASET,
+    DEFAULT_MARKET_DATA_ROOT,
+    DEFAULT_OUTPUT_DIR,
+    run_trade_analysis,
+)
 
 
 SUPPORTED_FORMATS = ("table", "csv", "json")
@@ -69,6 +75,27 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8000)
     serve.set_defaults(handler=_handle_serve)
 
+    trade_analysis = subparsers.add_parser("trade-analysis", help="Analyze closed trades against entry-time market context.")
+    trade_analysis.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Report output directory.")
+    trade_analysis.add_argument(
+        "--market-data-root",
+        type=Path,
+        default=DEFAULT_MARKET_DATA_ROOT,
+        help="Massive market data root. Default: %(default)s",
+    )
+    trade_analysis.add_argument("--gcp-project-id", help="BigQuery project ID. Defaults to GCP_PROJECT_ID.")
+    trade_analysis.add_argument(
+        "--bigquery-dataset",
+        default=DEFAULT_BIGQUERY_DATASET,
+        help="BigQuery dataset for MarketSurge metadata. Default: %(default)s",
+    )
+    trade_analysis.add_argument(
+        "--skip-bigquery",
+        action="store_true",
+        help="Run without MarketSurge metadata enrichment.",
+    )
+    trade_analysis.set_defaults(handler=_handle_trade_analysis)
+
     return parser
 
 
@@ -104,6 +131,18 @@ def _handle_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     uvicorn.run("stock_calculator.api:app", host=args.host, port=args.port)
+    return 0
+
+
+def _handle_trade_analysis(args: argparse.Namespace) -> int:
+    result = run_trade_analysis(
+        output_dir=args.output_dir,
+        market_data_root=args.market_data_root,
+        gcp_project_id=args.gcp_project_id,
+        bigquery_dataset=args.bigquery_dataset,
+        skip_bigquery=args.skip_bigquery,
+    )
+    print(f"Wrote trade analysis reports to {result.output_dir}")
     return 0
 
 
