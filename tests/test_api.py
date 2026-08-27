@@ -21,6 +21,7 @@ def test_rank_endpoint_returns_table():
     assert response.media_type == "text/plain"
     text = response.body.decode("utf-8")
     assert "Strategy" in text
+    assert "Exposure" in text
     assert "TEST" in text
     assert text.endswith("\n")
 
@@ -31,6 +32,7 @@ def test_rank_endpoint_returns_csv():
     assert response.media_type == "text/csv"
     text = response.body.decode("utf-8")
     assert text.startswith("symbol,market_regime,mode,strategy")
+    assert text.splitlines()[0].endswith(",exposure")
     assert "TEST" in text
 
 
@@ -41,6 +43,7 @@ def test_rank_endpoint_returns_json():
     payload = json.loads(response.body.decode("utf-8"))
     assert "rows" not in payload
     assert payload["groups"]["EP"][0]["symbol"] == "TEST"
+    assert payload["groups"]["EP"][0]["exposure"] == "No Trade"
     assert payload["groups"]["4% BO"] == []
     assert payload["groups"]["BO"] == []
     assert payload["groups"]["Pullback"] == []

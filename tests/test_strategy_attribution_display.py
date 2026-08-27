@@ -35,7 +35,7 @@ def test_strategy_attribution_strategy_frame_keeps_warmup_rows_when_attribution_
                 "mode_basis": "Need 15 valid R trades",
                 "trend": "Need 15 trades",
                 "trend_driver": "Need 15 trades",
-                "playbook": "Insufficient valid R-trade history; maintain minimum sizing until 15 valid R trades are available.",
+                "playbook": "Insufficient valid R-trade history; maintain minimum exposure until 15 valid R trades are available.",
                 "evidence": "14 closed trades | Exp R 0.40 | directional only until 15 valid R trades",
             }
         ]
@@ -115,7 +115,7 @@ def test_strategy_attribution_strategy_frame_keeps_single_value_risk_atr_without
                 "mode_basis": "15R +0.40R | Adj +0.35R",
                 "trend": "Need 30 trades",
                 "trend_driver": "Current strengths: Winner size",
-                "playbook": "Keep using Market Regime and Strategy Mode sizing while monitoring the listed drivers.",
+                "playbook": "Keep using Market Regime and Strategy Mode exposure while monitoring the listed drivers.",
                 "evidence": "PF 1.30 | Exp R 0.40 | Avg win R 2.27 | Risk/ATR 1.19",
             }
         ]
@@ -139,7 +139,7 @@ def test_strategy_attribution_strategy_frame_sentence_cases_regime_context():
                 "mode_basis": "15R +0.10R | Adj +0.08R",
                 "trend": "Flat (+0.00R)",
                 "trend_driver": "No clear driver",
-                "playbook": "Keep using Market Regime and Strategy Mode sizing while monitoring the listed drivers.",
+                "playbook": "Keep using Market Regime and Strategy Mode exposure while monitoring the listed drivers.",
                 "evidence": "Regime attribution: need at least 3 tagged trades in 2 regimes",
             }
         ]

@@ -4,7 +4,7 @@ Personal Streamlit dashboard and local workflow tools for trade planning, positi
 
 ## What It Does
 
-- Sizes positions from entry price, stop price, portfolio size, and risk percent.
+- Sizes positions from entry price, stop price, portfolio size, and risk percent, then applies a selected exposure cap.
 - Tracks active positions and calculated risk metrics in an editable Streamlit table.
 - Imports Robinhood CSV reports to derive FIFO exit matches, open lots, closed trades, realized P/L, and strategy metrics.
 - Preserves planned stops, strategy tags, ATR %, and market-regime context for later trade analysis.
@@ -30,7 +30,7 @@ Default sizing values live in `config.toml`:
 [defaults]
 portfolio_amount = 20000.0
 sizing_portfolio_amount = 20000.0
-risk_percent = 0.5
+risk_percent = 1.0
 market_regime = "GO"
 max_symbol_exposure_percent = 20.0
 add_on_unrealized_profit_preserve_percent = 50.0
@@ -41,18 +41,60 @@ iex_sizing_price_buffer_max = 0.10
 
 `market_regime` supports `GO`, `SELECTIVE GO`, and `NO-GO`.
 
+## Position Sizing
+
+The configured `risk_percent` is a global maximum-risk budget (1% in the checked-in configuration), not an editable
+per-trade input. The calculator first determines whole shares from that budget and the stop-loss distance. It then
+limits those shares to the selected `Exposure` tier:
+
+- `Full`: 20% of the position's portfolio value.
+- `Half`: 10%.
+- `Quarter`: 5%.
+- `Probe`: 2.5%.
+
+Final shares are the smaller of the risk-based shares and exposure-capped shares. `Total Risk` is the actual stop risk
+of those final shares, after whole-share rounding and any exposure cap. Saved active positions default to `Full` when
+loading a legacy row with no Exposure value. Exposure is stored with the position and displayed read-only after the
+position is added; the other saved source inputs remain editable.
+
+The New Position form and candidate ranking suggest Exposure from Market Regime and the selected strategy's mode:
+
+| Strategy mode | GO | SELECTIVE GO | NO-GO |
+| --- | --- | --- | --- |
+| Working | Full | Half | Quarter |
+| Caution | Half | Quarter | Probe |
+| Weak | Quarter | Probe | No Trade |
+| Failing | Probe | No Trade | No Trade |
+| Unknown | Probe | No Trade | No Trade |
+
+The form allows a manual Exposure override. Changing Regime, Strategy, or the calculated strategy mode resets the
+selection to the matrix recommendation; price, stop, ATR, and portfolio edits preserve the override. `No Trade`
+produces stop metrics but zero shares, position size, and Total Risk, and cannot be saved as an active position.
+
+This first version deliberately does not add a separate wide-stop rule or a portfolio-wide heat cap. A wide stop can
+therefore make the 1% maximum-risk calculation the binding constraint, while a tight stop can make Exposure bind.
+The existing aggregate per-symbol Exposure Limit remains a concentration warning rather than a sizing constraint.
+
+When IEX enrichment adds a sizing-price buffer, that buffered price is used for both risk sizing and the exposure cap.
+
 ## Data Storage
 
 By default, the app stores local runtime data under `data/`:
 
 - `positions.csv`: editable active-position source data.
-- `positions_archive.csv`: permanent latest-snapshot archive of every position added through the app.
+- `positions_archive.csv`: permanent latest-snapshot archive of every position added through the app, including its Exposure tier.
 - `campaign_overrides.csv`: manual Campaign View `Current Shares` and `Campaign Stop` overrides by symbol.
 - `planned_stops.csv`: durable entry stop, strategy, ATR %, and market-regime context.
 - `robinhood_transactions.csv`: cleaned imported Robinhood transactions with duplicate uploads skipped.
 
 `positions_archive.csv` is not an event log and does not track open/closed status. Deleting a row from active
 positions leaves its archive row intact; editing an active position updates the matching archive snapshot.
+
+The Exposure column is appended to both position schemas for backward compatibility. Legacy active rows with a blank
+or missing Exposure load as `Full`. Legacy archive rows retain a blank Exposure: a populated Exposure marks snapshots
+written with the new sizing semantics, where `risk_amount`/`Total Risk` is actual final stop risk. On Google Sheets,
+the app automatically grows worksheet row and column capacity before writing the expanded schemas and never shrinks it.
+Persisted `No Trade` or unknown nonblank Exposure values are rejected instead of silently coerced.
 
 Treat `data/` as user-local runtime data. It is ignored by git.
 
@@ -175,6 +217,12 @@ AAPL 200 195 4.5
 ```
 
 Use `--format csv` or `--format json` for machine-readable output.
+
+Ranking outputs now include `exposure`. It appears beside the sizing fields in the human table and is appended as the
+last field in CSV and each JSON candidate row so existing machine-column positions stay unchanged. `risk_percent` is
+the configured maximum risk for every candidate. A matrix `No Trade` result keeps stop metrics, reports zero sizing,
+and is identified by `exposure` plus `validation_error`; consumers should not infer the policy gate from a zero risk
+percentage.
 
 To fill missing price, stop, or ATR % from Alpaca, set credentials outside the repo and pass `--enrich`:
 

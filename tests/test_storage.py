@@ -13,6 +13,7 @@ from stock_calculator.storage import (
     LocalCsvStorage,
     POSITION_ARCHIVE_COLUMNS,
     StorageConfigurationError,
+    StorageError,
     append_robinhood_transactions,
     build_storage_backend,
     generate_planned_stops_from_transactions,
@@ -57,6 +58,7 @@ def test_save_positions_filters_blank_rows(tmp_path):
     assert loaded.columns.tolist() == POSITION_SOURCE_COLUMNS
     assert loaded[POSITION_ID_COLUMN].str.startswith("pos_").all()
     assert loaded["atr"].tolist() == [2.5]
+    assert loaded["exposure"].tolist() == ["Full"]
 
 
 def test_load_positions_accepts_old_files_without_atr(tmp_path):
@@ -80,6 +82,7 @@ def test_load_positions_accepts_old_files_without_atr(tmp_path):
     assert loaded["symbol"].tolist() == ["AAPL"]
     assert loaded[POSITION_ID_COLUMN].str.startswith("pos_").all()
     assert loaded["atr"].isna().all()
+    assert loaded["exposure"].tolist() == ["Full"]
 
 
 def test_load_positions_returns_empty_frame_for_missing_file(tmp_path):
@@ -118,6 +121,52 @@ def test_save_and_load_positions_archive_preserves_visible_table_fields(tmp_path
     assert loaded["strategy"].tolist() == ["EP"]
     assert loaded["number_of_shares"].tolist() == [20]
     assert loaded["position_size"].tolist() == [2000.0]
+    assert loaded["exposure"].tolist() == ["Full"]
+
+
+def test_load_legacy_positions_archive_preserves_blank_exposure(tmp_path):
+    path = tmp_path / "positions_archive.csv"
+    pd.DataFrame(
+        [
+            {
+                POSITION_ID_COLUMN: "pos_legacy",
+                "symbol": "AAPL",
+                "buy_date": "2026-04-01",
+                "share_price": 100,
+                "stop_price": 95,
+                "risk_amount": 100,
+            }
+        ]
+    ).to_csv(path, index=False)
+
+    loaded = load_positions_archive(path)
+
+    assert loaded.iloc[0]["exposure"] == ""
+    assert loaded.iloc[0]["risk_amount"] == 100
+
+
+@pytest.mark.parametrize("value", ["No Trade", "Maximum"])
+def test_local_positions_load_rejects_nonpersistable_exposure_without_modifying_file(tmp_path, value):
+    path = tmp_path / "positions.csv"
+    pd.DataFrame([{"symbol": "WAIT", "exposure": value}]).to_csv(path, index=False)
+    original = path.read_bytes()
+
+    with pytest.raises(StorageError, match=rf"invalid Exposure '{value}'"):
+        load_positions(path)
+
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("save_function", [save_positions, save_positions_archive])
+def test_local_position_writes_reject_nonpersistable_exposure_without_modifying_file(tmp_path, save_function):
+    path = tmp_path / "stored.csv"
+    path.write_text("existing,data\nkeep,this\n", encoding="utf-8")
+    original = path.read_bytes()
+
+    with pytest.raises(StorageError, match="invalid Exposure 'No Trade'"):
+        save_function(pd.DataFrame([{"symbol": "WAIT", "exposure": "No Trade"}]), path)
+
+    assert path.read_bytes() == original
 
 
 def test_upsert_positions_archive_updates_matches_and_keeps_deleted_rows():
@@ -715,6 +764,71 @@ def test_google_sheets_save_blanks_trailing_rows_in_same_update():
     ]
 
 
+def test_google_sheets_save_grows_columns_without_shrinking_rows():
+    legacy_columns = POSITION_SOURCE_COLUMNS[:-1]
+    worksheet = FakeWorksheet([legacy_columns], row_count=20, col_count=len(legacy_columns))
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"positions": worksheet}))
+
+    backend.save_positions(pd.DataFrame(columns=POSITION_SOURCE_COLUMNS))
+
+    assert worksheet.resize_calls == [(20, len(POSITION_SOURCE_COLUMNS))]
+    assert worksheet.row_count == 20
+    assert worksheet.col_count == len(POSITION_SOURCE_COLUMNS)
+
+
+def test_google_sheets_save_grows_rows_and_columns_for_archive_append():
+    legacy_columns = POSITION_ARCHIVE_COLUMNS[:-1]
+    worksheet = FakeWorksheet([legacy_columns], row_count=2, col_count=len(legacy_columns))
+    backend = GoogleSheetsStorage(FakeSpreadsheet({"positions_archive": worksheet}))
+    archive = pd.DataFrame(
+        [
+            {POSITION_ID_COLUMN: "pos_one", "symbol": "ONE", "exposure": "Full"},
+            {POSITION_ID_COLUMN: "pos_two", "symbol": "TWO", "exposure": "Half"},
+        ]
+    )
+
+    backend.save_positions_archive(archive)
+
+    assert worksheet.resize_calls == [(3, len(POSITION_ARCHIVE_COLUMNS))]
+    assert worksheet.row_count == 3
+    assert worksheet.col_count == len(POSITION_ARCHIVE_COLUMNS)
+    assert worksheet.values[1][-1] == "Full"
+    assert worksheet.values[2][-1] == "Half"
+
+
+@pytest.mark.parametrize("worksheet_name", ["positions", "positions_archive"])
+def test_google_sheets_position_load_rejects_invalid_exposure_without_modifying_sheet(worksheet_name):
+    columns = POSITION_SOURCE_COLUMNS if worksheet_name == "positions" else POSITION_ARCHIVE_COLUMNS
+    row = [""] * len(columns)
+    row[columns.index("symbol")] = "WAIT"
+    row[columns.index("exposure")] = "No Trade"
+    original = [columns, row]
+    worksheet = FakeWorksheet([line.copy() for line in original])
+    backend = GoogleSheetsStorage(FakeSpreadsheet({worksheet_name: worksheet}))
+
+    with pytest.raises(StorageError, match="invalid Exposure 'No Trade'"):
+        getattr(backend, f"load_{worksheet_name}")()
+
+    assert worksheet.values == original
+    assert worksheet.update_calls == 0
+
+
+@pytest.mark.parametrize("worksheet_name", ["positions", "positions_archive"])
+def test_google_sheets_position_write_rejects_invalid_exposure_without_modifying_sheet(worksheet_name):
+    columns = POSITION_SOURCE_COLUMNS if worksheet_name == "positions" else POSITION_ARCHIVE_COLUMNS
+    existing = [columns, ["existing", *[""] * (len(columns) - 1)]]
+    worksheet = FakeWorksheet([line.copy() for line in existing])
+    backend = GoogleSheetsStorage(FakeSpreadsheet({worksheet_name: worksheet}))
+
+    with pytest.raises(StorageError, match="invalid Exposure 'Maximum'"):
+        getattr(backend, f"save_{worksheet_name}")(
+            pd.DataFrame([{"symbol": "WAIT", "exposure": "Maximum"}])
+        )
+
+    assert worksheet.values == existing
+    assert worksheet.update_calls == 0
+
+
 def test_google_sheets_failed_save_preserves_existing_rows():
     existing = [
         PLANNED_STOP_COLUMNS,
@@ -894,11 +1008,20 @@ class WorksheetNotFound(Exception):
 
 
 class FakeWorksheet:
-    def __init__(self, values: list[list[object]]):
+    def __init__(
+        self,
+        values: list[list[object]],
+        *,
+        row_count: int | None = None,
+        col_count: int | None = None,
+    ):
         self.values = values
-        self.row_count = max(1, len(values))
+        self.row_count = row_count if row_count is not None else max(1, len(values))
+        inferred_columns = max((len(row) for row in values), default=1)
+        self.col_count = col_count if col_count is not None else max(1, inferred_columns)
         self.clear_calls = 0
         self.update_calls = 0
+        self.resize_calls: list[tuple[int, int]] = []
         self.update_error: Exception | None = None
 
     def get_all_values(self):
@@ -914,6 +1037,11 @@ class FakeWorksheet:
             raise self.update_error
         self.values = values
 
+    def resize(self, *, rows: int, cols: int):
+        self.resize_calls.append((rows, cols))
+        self.row_count = rows
+        self.col_count = cols
+
 
 class FakeSpreadsheet:
     def __init__(self, worksheets: dict[str, FakeWorksheet] | None = None):
@@ -925,7 +1053,7 @@ class FakeSpreadsheet:
         return self.worksheets[title]
 
     def add_worksheet(self, title: str, rows: int, cols: int):
-        worksheet = FakeWorksheet([])
+        worksheet = FakeWorksheet([], row_count=rows, col_count=cols)
         self.worksheets[title] = worksheet
         return worksheet
 

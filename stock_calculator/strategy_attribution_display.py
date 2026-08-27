@@ -120,10 +120,10 @@ def mode_basis_part_text(part: str) -> str:
 
 def compact_strategy_attribution_playbook(text: str) -> str:
     replacements = {
-        "Trend is recovering. Watch for Working status before resuming normal sizing.": (
+        "Trend is recovering. Watch for Working status before increasing exposure.": (
             "Recovering; wait for Working before sizing back up."
         ),
-        "Insufficient valid R-trade history; maintain minimum sizing until 15 valid R trades are available.": (
+        "Insufficient valid R-trade history; maintain minimum exposure until 15 valid R trades are available.": (
             "Not enough R history; stay minimum size until 15 valid R trades."
         ),
         "Require cleaner reward/risk and avoid taking profits too quickly.": (

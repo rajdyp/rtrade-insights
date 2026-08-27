@@ -258,7 +258,7 @@ def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
             "rolling_mode_exp": "N/A",
             "mode_adjusted_score": "N/A",
             "mode": "Unknown",
-            "action": "Tiny size only",
+            "action": "Probe / no trade",
             "mode_basis": f"Need {STRATEGY_MODE_WINDOW} valid R trades; found {found} in latest {lookback} closed trades",
         }
     rolling_exp = rolling_scores.rolling_exp
@@ -268,16 +268,16 @@ def calculate_rolling_mode(closed_trades: pd.DataFrame) -> dict[str, str]:
 
     if rolling_exp > STRATEGY_MODE_WORKING_THRESHOLD:
         mode = "Working"
-        action = "Normal size"
+        action = "Use regime baseline"
     elif rolling_exp >= 0:
         mode = "Caution"
-        action = "Half size"
+        action = "One tier smaller"
     elif rolling_exp >= STRATEGY_MODE_FAILING_THRESHOLD:
         mode = "Weak"
-        action = "Quarter size"
+        action = "Two tiers smaller / pause"
     else:
         mode = "Failing"
-        action = "Probe only / pause"
+        action = "Probe / no trade"
 
     mode_basis = f"{STRATEGY_MODE_WINDOW}R {rolling_exp:+.2f}R | Adj {adjusted_score:+.2f}R"
     if rolling_scores.skipped_count:
@@ -730,26 +730,26 @@ def _attribution_playbook(mode: str, trend_driver: str, trend: str, market_regim
     regime = str(market_regime or "").strip().upper()
     trend_label = _trend_label(trend)
     if mode == "Working" and regime == "NO-GO":
-        return "Strategy is working, but NO-GO regime limits sizing. Wait for GO conditions for full deployment."
+        return "Strategy is working, but NO-GO regime limits exposure. Wait for GO conditions for full deployment."
     if mode == "Working" and trend_label == "Weakening":
         driver_detail = "" if trend_driver == "No clear driver" else f" ({trend_driver})"
         return f"Early warning: expectancy is declining{driver_detail}. Monitor closely and reduce size proactively if trend continues."
     if mode == "Caution" and trend_label == "Weakening":
         return "Trend weakening from Caution. Reduce to Weak-level sizing proactively rather than waiting for mode to drop."
     if mode == "Caution" and trend_label in {"Improving", "Recovering"}:
-        return "Trend is recovering. Watch for Working status before resuming normal sizing."
+        return "Trend is recovering. Watch for Working status before increasing exposure."
     if mode in {"Working", "Caution"}:
-        return "Keep using Market Regime and Strategy Mode sizing while monitoring the listed drivers."
+        return "Keep using Market Regime and Strategy Mode exposure while monitoring the listed drivers."
     if mode == "Unknown":
-        return "Insufficient valid R-trade history; maintain minimum sizing until 15 valid R trades are available."
+        return "Insufficient valid R-trade history; maintain minimum exposure until 15 valid R trades are available."
     if trend_driver == "No clear driver":
-        return "Keep risk reduced until mode improves."
+        return "Keep exposure reduced until mode improves."
     if trend_driver.startswith("Regime filter"):
         return "Tighten entry regime filter before resuming normal activity."
     driver_advice = _driver_advice(trend_driver)
     if driver_advice:
         return driver_advice
-    return "Keep risk reduced until mode improves."
+    return "Keep exposure reduced until mode improves."
 
 
 def _join_drivers(drivers: list[str]) -> str:

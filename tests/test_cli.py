@@ -37,6 +37,7 @@ def test_rank_file_prints_table_output(tmp_path, capsys, monkeypatch):
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Strategy" in output
+    assert "Exposure" in output
     assert "TEST" in output
     assert output.endswith("\n")
 
@@ -54,6 +55,7 @@ def test_rank_file_supports_json_output(tmp_path, capsys, monkeypatch):
     assert exit_code == 0
     assert "rows" not in payload
     assert payload["groups"]["EP"][0]["symbol"] == "TEST"
+    assert payload["groups"]["EP"][0]["exposure"] == "Probe"
     assert payload["groups"]["4% BO"] == []
     assert payload["groups"]["BO"] == []
 

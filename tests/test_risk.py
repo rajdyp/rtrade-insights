@@ -1,17 +1,39 @@
 import pandas as pd
+import pytest
 
 from stock_calculator.risk import (
     normalize_market_regime,
     strategy_mode_for_selection,
-    suggested_risk_percent,
+    suggested_exposure,
 )
 
 
-def test_suggested_risk_percent_uses_market_regime_and_strategy_mode_matrix():
-    assert suggested_risk_percent("GO", "Working", fallback=0.5) == 1.00
-    assert suggested_risk_percent("SELECTIVE GO", "Weak", fallback=0.5) == 0.12
-    assert suggested_risk_percent("NO-GO", "Failing", fallback=0.5) == 0.00
-    assert suggested_risk_percent("NO-GO", "Unknown", fallback=0.5) == 0.00
+@pytest.mark.parametrize(
+    ("regime", "mode", "expected"),
+    [
+        ("GO", "Working", "Full"),
+        ("GO", "Caution", "Half"),
+        ("GO", "Weak", "Quarter"),
+        ("GO", "Failing", "Probe"),
+        ("GO", "Unknown", "Probe"),
+        ("SELECTIVE GO", "Working", "Half"),
+        ("SELECTIVE GO", "Caution", "Quarter"),
+        ("SELECTIVE GO", "Weak", "Probe"),
+        ("SELECTIVE GO", "Failing", "No Trade"),
+        ("SELECTIVE GO", "Unknown", "No Trade"),
+        ("NO-GO", "Working", "Quarter"),
+        ("NO-GO", "Caution", "Probe"),
+        ("NO-GO", "Weak", "No Trade"),
+        ("NO-GO", "Failing", "No Trade"),
+        ("NO-GO", "Unknown", "No Trade"),
+    ],
+)
+def test_suggested_exposure_uses_market_regime_and_strategy_mode_matrix(regime, mode, expected):
+    assert suggested_exposure(regime, mode) == expected
+
+
+def test_suggested_exposure_normalizes_unknown_inputs():
+    assert suggested_exposure("invalid", "Experimental") == "Probe"
 
 
 def test_strategy_mode_for_selection_reads_existing_strategy_metrics_mode_column():

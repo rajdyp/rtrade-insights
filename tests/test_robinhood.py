@@ -948,7 +948,7 @@ def test_calculate_strategy_metrics_adds_rolling_mode_and_action_from_r_multiple
             "rolling_mode_exp": "+0.35R",
             "mode_adjusted_score": "+0.35R",
             "mode": "Working",
-            "action": "Normal size",
+            "action": "Use regime baseline",
         }
     ]
 
@@ -963,7 +963,7 @@ def test_calculate_strategy_metrics_keeps_adjusted_score_as_reference_only():
     assert row["rolling_mode_exp"] == "+0.35R"
     assert row["mode_adjusted_score"] == "+0.25R"
     assert row["mode"] == "Working"
-    assert row["action"] == "Normal size"
+    assert row["action"] == "Use regime baseline"
 
 
 def test_calculate_strategy_metrics_uses_latest_15_closed_trades_by_sell_date():
@@ -979,7 +979,7 @@ def test_calculate_strategy_metrics_uses_latest_15_closed_trades_by_sell_date():
     assert result.iloc[0]["rolling_mode_exp"] == "-0.10R"
     assert result.iloc[0]["mode_adjusted_score"] == "-0.10R"
     assert result.iloc[0]["mode"] == "Weak"
-    assert result.iloc[0]["action"] == "Quarter size"
+    assert result.iloc[0]["action"] == "Two tiers smaller / pause"
 
 
 def test_calculate_strategy_metrics_requires_15_closed_trades_for_rolling_mode():
@@ -992,7 +992,7 @@ def test_calculate_strategy_metrics_requires_15_closed_trades_for_rolling_mode()
     assert result.iloc[0]["rolling_mode_exp"] == "N/A"
     assert result.iloc[0]["mode_adjusted_score"] == "N/A"
     assert result.iloc[0]["mode"] == "Unknown"
-    assert result.iloc[0]["action"] == "Tiny size only"
+    assert result.iloc[0]["action"] == "Probe / no trade"
 
 
 def test_calculate_strategy_metrics_uses_latest_15_valid_r_trades_within_20_trade_lookback():
@@ -1006,7 +1006,7 @@ def test_calculate_strategy_metrics_uses_latest_15_valid_r_trades_within_20_trad
     assert metrics.iloc[0]["rolling_mode_exp"] == "+0.50R"
     assert metrics.iloc[0]["mode_adjusted_score"] == "+0.50R"
     assert metrics.iloc[0]["mode"] == "Working"
-    assert metrics.iloc[0]["action"] == "Normal size"
+    assert metrics.iloc[0]["action"] == "Use regime baseline"
     assert attribution.iloc[0]["mode_basis"] == (
         "15 valid R trades from latest 16 closed trades; skipped 1 missing/invalid stop | 15R +0.50R | Adj +0.50R"
     )
@@ -1026,16 +1026,16 @@ def test_calculate_strategy_metrics_stays_unknown_when_20_trade_lookback_has_too
     assert metrics.iloc[0]["rolling_mode_exp"] == "N/A"
     assert metrics.iloc[0]["mode_adjusted_score"] == "N/A"
     assert metrics.iloc[0]["mode"] == "Unknown"
-    assert metrics.iloc[0]["action"] == "Tiny size only"
+    assert metrics.iloc[0]["action"] == "Probe / no trade"
     assert attribution.iloc[0]["mode_basis"] == "Need 15 valid R trades; found 14 in latest 20 closed trades"
 
 
 def test_calculate_strategy_metrics_maps_rolling_mode_thresholds():
     cases = [
-        (0.30, "+0.30R", "Caution", "Half size"),
-        (0.00, "+0.00R", "Caution", "Half size"),
-        (-0.10, "-0.10R", "Weak", "Quarter size"),
-        (-0.11, "-0.11R", "Failing", "Probe only / pause"),
+        (0.30, "+0.30R", "Caution", "One tier smaller"),
+        (0.00, "+0.00R", "Caution", "One tier smaller"),
+        (-0.10, "-0.10R", "Weak", "Two tiers smaller / pause"),
+        (-0.11, "-0.11R", "Failing", "Probe / no trade"),
     ]
 
     for r_multiple, expected_exp, expected_mode, expected_action in cases:
@@ -1063,14 +1063,14 @@ def test_calculate_strategy_metrics_calculates_rolling_mode_per_strategy():
             "rolling_mode_exp": "+0.40R",
             "mode_adjusted_score": "+0.40R",
             "mode": "Working",
-            "action": "Normal size",
+            "action": "Use regime baseline",
         },
         {
             "strategy": "BO",
             "rolling_mode_exp": "-0.30R",
             "mode_adjusted_score": "-0.30R",
             "mode": "Failing",
-            "action": "Probe only / pause",
+            "action": "Probe / no trade",
         },
     ]
 
@@ -1171,7 +1171,7 @@ def test_calculate_strategy_attribution_marks_flat_when_no_clear_driver():
     assert row["mode"] == "Caution"
     assert row["trend"] == "Flat (+0.00R)"
     assert row["trend_driver"] == "No clear driver"
-    assert row["playbook"] == "Keep using Market Regime and Strategy Mode sizing while monitoring the listed drivers."
+    assert row["playbook"] == "Keep using Market Regime and Strategy Mode exposure while monitoring the listed drivers."
 
 
 def test_calculate_strategy_attribution_requires_15_trades_per_strategy():
@@ -1188,7 +1188,7 @@ def test_calculate_strategy_attribution_requires_15_trades_per_strategy():
     }
     assert row["evidence"] == "14 closed trades | Exp R 0.40 | directional only until 15 valid R trades"
     assert row["playbook"] == (
-        "Insufficient valid R-trade history; maintain minimum sizing until 15 valid R trades are available."
+        "Insufficient valid R-trade history; maintain minimum exposure until 15 valid R trades are available."
     )
 
 
@@ -1259,7 +1259,7 @@ def test_calculate_strategy_attribution_playbook_respects_no_go_regime_for_worki
     row = result.iloc[0]
     assert row["mode"] == "Working"
     assert row["playbook"] == (
-        "Strategy is working, but NO-GO regime limits sizing. Wait for GO conditions for full deployment."
+        "Strategy is working, but NO-GO regime limits exposure. Wait for GO conditions for full deployment."
     )
 
 
@@ -1272,7 +1272,7 @@ def test_calculate_strategy_attribution_playbook_reports_caution_recovery():
     row = result.iloc[0]
     assert row["mode"] == "Caution"
     assert row["trend"] == "Improving (+0.30R)"
-    assert row["playbook"] == "Trend is recovering. Watch for Working status before resuming normal sizing."
+    assert row["playbook"] == "Trend is recovering. Watch for Working status before increasing exposure."
 
 
 def test_calculate_strategy_attribution_playbook_reports_caution_weakening():

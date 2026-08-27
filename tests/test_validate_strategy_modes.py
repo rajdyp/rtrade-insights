@@ -44,7 +44,7 @@ def test_simulate_thresholds_uses_only_prior_strategy_trades_for_mode():
 
     assert result.eligible_trades == 2
     assert result.mode_counts == {"Working": 1, "Caution": 0, "Weak": 0, "Failing": 1}
-    assert result.total_scaled_r == 2.2
+    assert result.total_scaled_r == 2.25
 
 
 def test_compare_adjustment_factors_reports_mode_changes_against_raw():
@@ -62,9 +62,9 @@ def test_compare_adjustment_factors_reports_mode_changes_against_raw():
 
     assert raw.adjustment_k == 0.0
     assert raw.mode_changes == {}
-    assert raw.total_scaled_r == 2.2
+    assert raw.total_scaled_r == 2.25
     assert adjusted.adjustment_k == 1.0
-    assert adjusted.total_scaled_r == 1.32
+    assert adjusted.total_scaled_r == 1.375
     assert adjusted.mode_counts == {"Working": 0, "Caution": 0, "Weak": 0, "Failing": 2}
     assert adjusted.mode_changes == {"Working->Failing": 1}
 
@@ -94,7 +94,7 @@ def test_calculate_max_drawdown_and_return_drawdown_score():
     assert return_drawdown_score(0.5, 3.0) == 0.1667
 
 
-def test_constant_risk_baselines_use_same_eligible_trades_as_mode_sizing():
+def test_constant_exposure_baselines_use_same_eligible_trades_as_mode_exposure():
     trades = pd.DataFrame(
         [
             {"strategy": "BO", "sell_date": "2026-01-01", "r_multiple": 1.0},
@@ -107,7 +107,7 @@ def test_constant_risk_baselines_use_same_eligible_trades_as_mode_sizing():
 
     comparisons = compare_sizing_methods(run)
 
-    assert [comparison.label for comparison in comparisons] == ["Full risk", "Half risk", "Mode sizing"]
+    assert [comparison.label for comparison in comparisons] == ["Full exposure", "Half exposure", "Mode exposure"]
     assert [comparison.eligible_trades for comparison in comparisons] == [2, 2, 2]
     assert comparisons[0].total_scaled_r == 0.0
     assert comparisons[1].total_scaled_r == 0.0
@@ -155,7 +155,7 @@ def test_render_results_shows_comparisons_before_ranked_thresholds():
     assert output.index("Current production comparison") < output.index("Best candidate comparison")
     assert output.index("Adjustment comparison") < output.index("Best candidate comparison")
     assert output.index("Best candidate comparison") < output.index("Top 2 candidate thresholds")
-    assert "Full risk" in output
-    assert "Half risk" in output
-    assert "Mode sizing" in output
+    assert "Full exposure" in output
+    assert "Half exposure" in output
+    assert "Mode exposure" in output
     assert "changes_vs_raw" in output
