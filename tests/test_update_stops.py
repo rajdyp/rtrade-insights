@@ -157,6 +157,7 @@ class FakeWorksheet:
     def __init__(self, values):
         self.values = values
         self.row_count = max(1, len(values))
+        self.col_count = max((len(row) for row in values), default=1)
 
     def get_all_values(self):
         return self.values
@@ -166,6 +167,10 @@ class FakeWorksheet:
 
     def update(self, values, value_input_option=None):
         self.values = values
+
+    def resize(self, *, rows, cols):
+        self.row_count = rows
+        self.col_count = cols
 
 
 class FakeSpreadsheet:
@@ -179,5 +184,7 @@ class FakeSpreadsheet:
 
     def add_worksheet(self, title, rows, cols):
         worksheet = FakeWorksheet([])
+        worksheet.row_count = rows
+        worksheet.col_count = cols
         self.worksheets[title] = worksheet
         return worksheet

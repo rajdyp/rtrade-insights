@@ -7,7 +7,7 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path):
     assert config == AppConfig(
         portfolio_amount=20_000.0,
         sizing_portfolio_amount=20_000.0,
-        risk_percent=0.5,
+        risk_percent=1.0,
         market_regime="GO",
         max_symbol_exposure_percent=20.0,
         add_on_unrealized_profit_preserve_percent=50.0,
@@ -123,7 +123,7 @@ def test_load_config_falls_back_for_invalid_toml(tmp_path):
     assert config == AppConfig(
         portfolio_amount=20_000.0,
         sizing_portfolio_amount=20_000.0,
-        risk_percent=0.5,
+        risk_percent=1.0,
         market_regime="GO",
         max_symbol_exposure_percent=20.0,
         add_on_unrealized_profit_preserve_percent=50.0,

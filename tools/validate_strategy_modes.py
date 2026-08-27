@@ -12,7 +12,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from stock_calculator.risk import RISK_PERCENT_MATRIX
+from stock_calculator.sizing_policy import EXPOSURE_RECOMMENDATION_MATRIX, NO_TRADE_EXPOSURE
 from stock_calculator.robinhood import (
     STRATEGY_MODE_ADJUSTMENT_K,
     STRATEGY_MODE_FAILING_THRESHOLD,
@@ -33,8 +33,15 @@ DEFAULT_WINDOWS = (5, 10, 15, 20)
 DEFAULT_FAILING_THRESHOLDS = (-0.10, -0.15, -0.20, -0.25, -0.30, -0.35, -0.40, -0.45, -0.50)
 DEFAULT_WORKING_THRESHOLDS = (0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
 DEFAULT_ADJUSTMENT_KS = (0.0, 0.25, STRATEGY_MODE_ADJUSTMENT_K, 0.75, 1.0)
+EXPOSURE_DEPLOYMENT_MULTIPLIERS = {
+    "Full": 1.0,
+    "Half": 0.5,
+    "Quarter": 0.25,
+    "Probe": 0.125,
+    NO_TRADE_EXPOSURE: 0.0,
+}
 GO_MODE_MULTIPLIERS = {
-    mode: RISK_PERCENT_MATRIX["GO"][mode]
+    mode: EXPOSURE_DEPLOYMENT_MULTIPLIERS[EXPOSURE_RECOMMENDATION_MATRIX["GO"][mode]]
     for mode in MODE_ORDER
 }
 
@@ -186,8 +193,8 @@ def _sample_stddev(values: list[float], mean_r: float) -> float:
 
 def compare_sizing_methods(run: SimulationRun) -> list[SizingComparison]:
     return [
-        _constant_sizing_comparison("Full risk", run, 1.00),
-        _constant_sizing_comparison("Half risk", run, 0.50),
+        _constant_sizing_comparison("Full exposure", run, 1.00),
+        _constant_sizing_comparison("Half exposure", run, 0.50),
         _mode_sizing_comparison(run),
     ]
 
@@ -202,7 +209,7 @@ def _mode_sizing_comparison(run: SimulationRun) -> SizingComparison:
         r_multiple * GO_MODE_MULTIPLIERS[mode]
         for r_multiple, mode in run.returns_by_mode
     ]
-    return _sizing_comparison("Mode sizing", scaled_returns)
+    return _sizing_comparison("Mode exposure", scaled_returns)
 
 
 def _sizing_comparison(label: str, scaled_returns: list[float]) -> SizingComparison:
@@ -359,7 +366,7 @@ def _format_thresholds(thresholds: ModeThresholds) -> str:
 
 
 def _render_comparison_table(comparisons: list[SizingComparison]) -> str:
-    headers = ["sizing", "trades", "total_r", "max_dd", "score"]
+    headers = ["deployment", "trades", "total_r", "max_dd", "score"]
     rows = [
         [
             comparison.label,

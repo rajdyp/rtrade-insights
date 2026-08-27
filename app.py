@@ -8,6 +8,8 @@ import streamlit as st
 
 from stock_calculator.calculations import (
     CAMPAIGN_TRIM_VIEW_COLUMNS,
+    DEFAULT_EXPOSURE,
+    EXPOSURE_LEVELS,
     INPUT_COLUMNS,
     POSITION_ID_COLUMN,
     PUBLIC_OUTPUT_COLUMNS,
@@ -21,6 +23,8 @@ from stock_calculator.calculations import (
     committed_positions,
     delete_positions_by_index,
     draft_position,
+    exposure_cap_message,
+    exposure_capped_positions_message,
     format_currency,
     format_percent,
     percent_of_portfolio,
@@ -55,8 +59,8 @@ from stock_calculator.risk import (
     default_strategy,
     normalize_market_regime,
     strategy_mode_for_selection,
-    suggested_risk_percent,
 )
+from stock_calculator.sizing_policy import resolve_draft_exposure
 from stock_calculator.reporting import (
     ALL_TIME_LABEL,
     calculate_strategy_report_metrics,
@@ -112,8 +116,17 @@ POSITION_EDITOR_COLUMNS = [
     "risk_percent",
     "risk_amount",
     "portfolio_amount",
+    "exposure",
 ]
-EDITABLE_POSITION_COLUMNS = [*INPUT_COLUMNS, "strategy"]
+EDITABLE_POSITION_COLUMNS = [
+    "symbol",
+    "buy_date",
+    "share_price",
+    "stop_price",
+    "atr",
+    "portfolio_amount",
+    "strategy",
+]
 EDITABLE_CAMPAIGN_VIEW_COLUMNS = ["current_shares", "campaign_stop"]
 POSITIONS_TABLE_MIN_VISIBLE_ROWS = 5
 ROBINHOOD_TABLE_HEADER_HEIGHT = 36
@@ -587,9 +600,10 @@ def positions_column_config() -> dict:
         "sell_lot": st.column_config.NumberColumn("Sell Lot", width=68),
         "hold_count": st.column_config.NumberColumn("Hold Days", width=74),
         "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=104),
-        "risk_percent": st.column_config.NumberColumn("Risk %", format="%.2f%%", width=72),
+        "risk_percent": st.column_config.NumberColumn("Max Risk %", format="%.2f%%", width=82),
         "risk_amount": st.column_config.NumberColumn("Total Risk", format="$%.2f", width=96),
         "portfolio_amount": st.column_config.NumberColumn("Portfolio", format="$%.2f", width=104),
+        "exposure": st.column_config.SelectboxColumn("Exposure", options=list(EXPOSURE_LEVELS), width=82),
         DELETE_COLUMN: st.column_config.CheckboxColumn("x", width=38, default=False),
     }
 
@@ -1164,7 +1178,8 @@ def add_current_draft() -> None:
         stop_price=st.session_state.get("draft_stop_price"),
         atr=st.session_state.get("draft_atr"),
         portfolio_amount=st.session_state.get("draft_portfolio_amount"),
-        risk_percent=st.session_state.get("draft_risk_percent"),
+        risk_percent=config.risk_percent,
+        exposure=st.session_state.get("draft_exposure", DEFAULT_EXPOSURE),
     )
     calculated_draft = calculate_positions(draft_from_state)
     validation_error = str(calculated_draft.iloc[0]["validation_error"] or "")
@@ -1188,7 +1203,8 @@ def add_current_draft() -> None:
     st.session_state.draft_atr = 0.0
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
     st.session_state.draft_strategy = default_strategy()
-    st.session_state.draft_risk_context = None
+    st.session_state.pop("draft_exposure", None)
+    st.session_state.pop("draft_exposure_context", None)
 
 
 def delete_selected_positions(selected_rows: list[int]) -> None:
@@ -1222,14 +1238,12 @@ if "draft_atr" not in st.session_state:
     st.session_state.draft_atr = 0.0
 if "draft_portfolio_amount" not in st.session_state:
     st.session_state.draft_portfolio_amount = config.sizing_portfolio_amount
-if "draft_risk_percent" not in st.session_state:
-    st.session_state.draft_risk_percent = config.risk_percent
 if "draft_strategy" not in st.session_state:
     st.session_state.draft_strategy = default_strategy()
 if "draft_market_regime" not in st.session_state:
     st.session_state.draft_market_regime = normalize_market_regime(config.market_regime)
-if "draft_risk_context" not in st.session_state:
-    st.session_state.draft_risk_context = None
+if "draft_exposure_context" not in st.session_state:
+    st.session_state.draft_exposure_context = None
 if "position_editor_revision" not in st.session_state:
     st.session_state.position_editor_revision = 0
 if "campaign_live_prices" not in st.session_state:
@@ -1280,30 +1294,25 @@ if LAST_ARCHIVED_INPUT_KEY not in st.session_state:
 render_section("New Position", "Enter a candidate position and review the live sizing before adding it.")
 
 selected_strategy_mode = strategy_mode_for_selection(current_strategy_metrics, st.session_state.draft_strategy)
-risk_context = (
-    normalize_market_regime(st.session_state.draft_market_regime),
-    st.session_state.draft_strategy,
-    selected_strategy_mode,
+draft_exposure_state = resolve_draft_exposure(
+    previous_context=st.session_state.draft_exposure_context,
+    current_selection=st.session_state.get("draft_exposure"),
+    market_regime=st.session_state.draft_market_regime,
+    strategy=st.session_state.draft_strategy,
+    strategy_mode=selected_strategy_mode,
 )
-if st.session_state.draft_risk_context != risk_context:
-    st.session_state.draft_risk_percent = suggested_risk_percent(
-        risk_context[0],
-        risk_context[2],
-        config.risk_percent,
-    )
-    st.session_state.draft_risk_context = risk_context
+st.session_state.draft_exposure = draft_exposure_state.selection
+st.session_state.draft_exposure_context = draft_exposure_state.context
 
-top_cols = st.columns([1.2, 0.95, 1.15, 0.85, 0.7, 1.35, 1.0, 1.0, 0.75])
+top_cols = st.columns([1.15, 0.9, 1.05, 0.8, 0.85, 1.2, 0.9, 0.9, 0.7])
 symbol = top_cols[0].text_input("Symbol", key="draft_symbol").upper().strip()
 buy_date = top_cols[1].date_input("Buy Date", key="draft_buy_date")
 top_cols[2].selectbox("Regime", MARKET_REGIME_OPTIONS, key="draft_market_regime")
 top_cols[3].selectbox("Strategy", STRATEGY_OPTIONS, key="draft_strategy")
-risk_percent = top_cols[4].number_input(
-    "Risk %",
-    min_value=0.0,
-    step=0.01,
-    format="%.2f",
-    key="draft_risk_percent",
+exposure = top_cols[4].selectbox(
+    "Exposure",
+    draft_exposure_state.options,
+    key="draft_exposure",
 )
 portfolio_amount = top_cols[5].number_input(
     "Portfolio",
@@ -1323,7 +1332,8 @@ draft = draft_position(
     stop_price=stop_price,
     atr=atr,
     portfolio_amount=portfolio_amount,
-    risk_percent=risk_percent,
+    risk_percent=config.risk_percent,
+    exposure=exposure,
 )
 draft_result = calculate_positions(draft)
 draft_row = draft_result.iloc[0]
@@ -1350,17 +1360,18 @@ risk_neutral_add_on_result = (
     else None
 )
 risk_neutral_message = risk_neutral_add_on_message(risk_neutral_add_on_result)
+draft_exposure_message = exposure_cap_message(draft_row)
 
 preview_cols = st.columns(5)
 preview_cols[0].metric("Stop Loss", format_percent(first_value(draft_result, "stop_loss_percent")))
 preview_cols[1].metric("Risk in ATR", format_blank_optional_number(first_value(draft_result, "risk_in_atr")))
 preview_cols[2].metric("Shares", "" if pd.isna(draft_row["number_of_shares"]) else int(draft_row["number_of_shares"]))
 preview_cols[3].metric("Position Size", format_currency(first_value(draft_result, "position_size")))
-preview_cols[4].metric("Total Risk", format_currency(first_value(draft_result, "risk_amount")))
+draft_risk_percent = percent_of_portfolio(draft_row["risk_amount"], draft_row["portfolio_amount"])
+preview_cols[4].metric("Total Risk", format_currency_percent_pair(draft_row["risk_amount"], draft_risk_percent))
 
 if draft_error:
     feedback_message = draft_error
-    feedback_status = "error"
 elif draft_exposure_breach is not None:
     feedback_message = (
         f"Exposure limit: {draft_exposure_breach['symbol']} "
@@ -1368,19 +1379,18 @@ elif draft_exposure_breach is not None:
         f"({format_percent(draft_exposure_breach['exposure_percent'])}) "
         f"> {format_percent(config.max_symbol_exposure_percent)}."
     )
-    feedback_status = "ready"
 elif symbol:
     feedback_message = "Position is ready to add."
-    feedback_status = "ready"
 else:
     feedback_message = "Enter a symbol and prices to preview the position."
-    feedback_status = "idle"
 
 action_cols = st.columns([1.5, 1, 1.5])
 with action_cols[0]:
-    render_feedback(feedback_message, feedback_status)
+    render_feedback(feedback_message, "ready")
+    if draft_exposure_message is not None:
+        render_feedback(draft_exposure_message[0], "ready")
     if risk_neutral_message is not None:
-        render_feedback(risk_neutral_message[0], risk_neutral_message[1])
+        render_feedback(risk_neutral_message[0], "ready")
 with action_cols[1]:
     st.button("Add Position", disabled=not draft_is_valid, on_click=add_current_draft, width="stretch")
 
@@ -1395,8 +1405,9 @@ exposure_breaches = symbol_exposure_breaches(
     portfolio_amount=config.sizing_portfolio_amount,
     max_symbol_exposure_percent=config.max_symbol_exposure_percent,
 )
+active_exposure_message = exposure_capped_positions_message(visible_calculated)
 
-render_section("Positions", "Saved rows remain editable; calculated columns are read-only.")
+render_section("Positions", "Saved source fields remain editable; Exposure and calculated columns are read-only.")
 
 summary_cols = st.columns([1, 1.15, 1, 1])
 summary_cols[0].metric("Active Positions", active_positions)
@@ -1425,6 +1436,9 @@ if not exposure_breaches.empty:
         + f"; configured limit is {format_percent(config.max_symbol_exposure_percent)}.",
         "ready",
     )
+
+if active_exposure_message is not None:
+    render_feedback(active_exposure_message[0], active_exposure_message[1])
 
 if visible_calculated.empty:
     render_feedback("No positions yet. Add a valid position from the calculator above to start the list.", "idle")

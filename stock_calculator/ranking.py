@@ -10,14 +10,15 @@ from typing import Any
 import pandas as pd
 
 from stock_calculator.alpaca import AlpacaMarketDataClient, SUPPORTED_FEEDS
-from stock_calculator.calculations import calculate_positions
+from stock_calculator.calculations import calculate_positions, is_no_trade_result
 from stock_calculator.config import AppConfig, load_config
-from stock_calculator.risk import normalize_market_regime, strategy_mode_for_selection, suggested_risk_percent
+from stock_calculator.risk import normalize_market_regime, strategy_mode_for_selection
 from stock_calculator.robinhood import STRATEGY_OPTIONS, calculate_strategy_metrics, derive_fifo_trades
+from stock_calculator.sizing_policy import suggested_exposure
 from stock_calculator.storage import load_planned_stops, load_robinhood_transactions
 
 
-TABLE_COLUMNS = [
+RANK_TABLE_COLUMNS = [
     "symbol",
     "market_regime",
     "mode",
@@ -26,6 +27,7 @@ TABLE_COLUMNS = [
     "stop",
     "atr",
     "stop_loss_percent",
+    "exposure",
     "position_size",
     "risk_percent",
     "total_risk",
@@ -46,8 +48,26 @@ METADATA_COLUMNS = [
     "atr_timestamp",
 ]
 
-RANK_COLUMNS = [*TABLE_COLUMNS, *METADATA_COLUMNS]
-GATE_CLOSED_ERROR = "Gate closed: NO-GO / Failing; no new sizing."
+RANK_MACHINE_COLUMNS = [
+    "symbol",
+    "market_regime",
+    "mode",
+    "strategy",
+    "price",
+    "stop",
+    "atr",
+    "stop_loss_percent",
+    "position_size",
+    "risk_percent",
+    "total_risk",
+    "shares",
+    "risk_in_atr",
+    "validation_error",
+    *METADATA_COLUMNS,
+    "exposure",
+]
+RANK_COLUMNS = RANK_MACHINE_COLUMNS
+TABLE_COLUMNS = RANK_TABLE_COLUMNS
 
 TABLE_HEADERS = {
     "strategy": "Strategy",
@@ -61,8 +81,9 @@ TABLE_HEADERS = {
     "risk_in_atr": "R/ATR",
     "shares": "Shares",
     "position_size": "Pos Size",
-    "risk_percent": "Risk%",
+    "risk_percent": "Max Risk%",
     "total_risk": "Risk $",
+    "exposure": "Exposure",
     "validation_error": "Error",
 }
 
@@ -198,15 +219,14 @@ def rank_candidates(
             strategy_metrics = calculate_strategy_metrics(derivation.closed_trades)
         except Exception as exc:
             strategy_metrics = pd.DataFrame()
-            warnings.append(f"Could not load strategy history; using Unknown mode for risk sizing. Detail: {exc}")
+            warnings.append(f"Could not load strategy history; using Unknown mode for exposure sizing. Detail: {exc}")
     elif strategy_metrics is None:
         strategy_metrics = pd.DataFrame()
 
     rows = []
     for candidate in candidates:
         mode = strategy_mode_for_selection(strategy_metrics, candidate.strategy)
-        risk_percent = suggested_risk_percent(market_regime, mode, config.risk_percent)
-        validation_error_override = GATE_CLOSED_ERROR if risk_percent == 0 else None
+        exposure = suggested_exposure(market_regime, mode)
         calculated = calculate_positions(
             pd.DataFrame(
                 [
@@ -217,7 +237,8 @@ def rank_candidates(
                         "stop_price": candidate.stop,
                         "atr": candidate.atr,
                         "portfolio_amount": config.sizing_portfolio_amount,
-                        "risk_percent": risk_percent,
+                        "risk_percent": config.risk_percent,
+                        "exposure": exposure,
                     }
                 ]
             ),
@@ -229,7 +250,7 @@ def rank_candidates(
                 calculated,
                 mode,
                 market_regime,
-                validation_error_override=validation_error_override,
+                exposure=exposure,
             )
         )
 
@@ -363,11 +384,11 @@ def render_rank_result(result: RankResult, output_format: str = "table") -> str:
 
 def render_csv(result: RankResult) -> str:
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=RANK_COLUMNS, extrasaction="ignore")
+    writer = csv.DictWriter(buffer, fieldnames=RANK_MACHINE_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for rows in result.groups.values():
         for row in rows:
-            writer.writerow({column: _csv_value(row.get(column)) for column in RANK_COLUMNS})
+            writer.writerow({column: _csv_value(row.get(column)) for column in RANK_MACHINE_COLUMNS})
     if result.errors or result.warnings:
         writer.writerow({})
         writer.writerow({"strategy": "Warnings/Errors"})
@@ -380,7 +401,7 @@ def render_csv(result: RankResult) -> str:
 
 def render_table(result: RankResult) -> str:
     table_rows = [_format_table_row(row) for row in result.rows]
-    headers = [TABLE_HEADERS[column] for column in TABLE_COLUMNS]
+    headers = [TABLE_HEADERS[column] for column in RANK_TABLE_COLUMNS]
     widths = [
         max(len(headers[index]), *(len(row[index]) for row in table_rows)) if table_rows else len(headers[index])
         for index in range(len(headers))
@@ -418,9 +439,9 @@ def _rank_row(
     mode: str,
     market_regime: str,
     *,
-    validation_error_override: str | None = None,
+    exposure: str,
 ) -> dict[str, object]:
-    return {
+    row = {
         "strategy": candidate.strategy,
         "mode": mode,
         "market_regime": market_regime,
@@ -434,7 +455,7 @@ def _rank_row(
         "position_size": _optional_float(calculated["position_size"]),
         "risk_percent": _optional_float(calculated["risk_percent"]),
         "total_risk": _optional_float(calculated["risk_amount"]),
-        "validation_error": validation_error_override or str(calculated["validation_error"] or ""),
+        "validation_error": str(calculated["validation_error"] or ""),
         "price_source": candidate.price_source,
         "raw_price": candidate.raw_price,
         "sizing_price_buffer": candidate.sizing_price_buffer,
@@ -445,6 +466,10 @@ def _rank_row(
         "stop_timestamp": candidate.stop_timestamp,
         "atr_timestamp": candidate.atr_timestamp,
     }
+    if is_no_trade_result(calculated):
+        row["validation_error"] = f"No Trade recommended for {market_regime} / {mode}; no sizing."
+    row["exposure"] = exposure
+    return row
 
 
 def _group_rank_rows(rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -465,22 +490,24 @@ def _rank_row_sort_key(row: dict[str, object]) -> tuple[int, bool, float, str]:
 
 
 def _format_table_row(row: dict[str, object]) -> list[str]:
-    return [
-        str(row.get("symbol") or ""),
-        str(row.get("market_regime") or ""),
-        str(row.get("mode") or ""),
-        str(row.get("strategy") or ""),
-        _format_number(row.get("price")),
-        _format_number(row.get("stop")),
-        _format_number(row.get("atr")),
-        _format_number(row.get("stop_loss_percent")),
-        _format_number(row.get("position_size")),
-        _format_number(row.get("risk_percent")),
-        _format_number(row.get("total_risk")),
-        _format_integer(row.get("shares")),
-        _format_number(row.get("risk_in_atr")),
-        str(row.get("validation_error") or ""),
-    ]
+    return [_format_table_value(column, row.get(column)) for column in RANK_TABLE_COLUMNS]
+
+
+def _format_table_value(column: str, value: object) -> str:
+    if column == "shares":
+        return _format_integer(value)
+    if column in {
+        "price",
+        "stop",
+        "atr",
+        "stop_loss_percent",
+        "position_size",
+        "risk_percent",
+        "total_risk",
+        "risk_in_atr",
+    }:
+        return _format_number(value)
+    return str(value or "")
 
 
 def _expected_row_message(enrich: bool) -> str:

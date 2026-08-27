@@ -6,6 +6,8 @@ import pandas as pd
 
 from stock_calculator.config import AppConfig
 from stock_calculator.ranking import (
+    RANK_MACHINE_COLUMNS,
+    RANK_TABLE_COLUMNS,
     fallback_stop_from_low,
     parse_rank_text,
     rank_candidates,
@@ -156,7 +158,7 @@ def test_fallback_stop_uses_minimum_percentage_cap_and_rounding():
     assert fallback_stop_from_low(50.00, 66.665) == 49.87
 
 
-def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strategy_groups():
+def test_rank_candidates_uses_exposure_matrix_fixed_risk_and_sorts_within_strategy_groups():
     result = rank_candidates(
         """
         4% BO
@@ -182,10 +184,12 @@ def test_rank_candidates_uses_risk_matrix_strategy_modes_and_sorts_within_strate
     assert [row["symbol"] for row in result.groups["EP"]] == ["AAPL", "NVDA"]
     assert result.groups["4% BO"][0]["symbol"] == "PINS"
     assert result.groups["EP"][0]["mode"] == "Working"
-    assert result.groups["EP"][0]["risk_percent"] == 0.5
+    assert result.groups["EP"][0]["risk_percent"] == 0.25
+    assert result.groups["EP"][0]["exposure"] == "Half"
     assert result.groups["EP"][0]["risk_in_atr"] == 0.24
     assert result.groups["4% BO"][0]["mode"] == "Weak"
-    assert result.groups["4% BO"][0]["risk_percent"] == 0.12
+    assert result.groups["4% BO"][0]["risk_percent"] == 0.25
+    assert result.groups["4% BO"][0]["exposure"] == "Probe"
     assert result.groups["4% BO"][0]["risk_in_atr"] == 0.52
 
 
@@ -201,10 +205,11 @@ def test_rank_candidates_uses_unknown_mode_when_strategy_metrics_are_missing():
     )
 
     assert result.rows[0]["mode"] == "Unknown"
-    assert result.rows[0]["risk_percent"] == 0.06
+    assert result.rows[0]["risk_percent"] == 0.25
+    assert result.rows[0]["exposure"] == "No Trade"
 
 
-def test_rank_candidates_reports_gate_closed_for_zero_matrix_risk():
+def test_rank_candidates_reports_no_trade_with_fixed_risk_and_zero_sizing():
     result = rank_candidates(
         """
         EP
@@ -215,14 +220,32 @@ def test_rank_candidates_reports_gate_closed_for_zero_matrix_risk():
         today=date(2026, 5, 7),
     )
 
-    expected_error = "Gate closed: NO-GO / Failing; no new sizing."
-    assert result.rows[0]["risk_percent"] == 0.0
+    expected_error = "No Trade recommended for NO-GO / Failing; no sizing."
+    assert result.rows[0]["risk_percent"] == 0.25
+    assert result.rows[0]["exposure"] == "No Trade"
+    assert result.rows[0]["shares"] == 0
+    assert result.rows[0]["position_size"] == 0
+    assert result.rows[0]["total_risk"] == 0
+    assert result.rows[0]["stop_loss_percent"] == 5.2
+    assert result.rows[0]["risk_in_atr"] == 1.04
     assert result.rows[0]["validation_error"] == expected_error
     assert expected_error in render_table(result)
     assert expected_error in render_csv(result)
 
     json_payload = json.loads(render_rank_result(result, "json"))
     assert json_payload["groups"]["EP"][0]["validation_error"] == expected_error
+
+
+def test_no_trade_recommendation_does_not_mask_ordinary_input_validation():
+    result = rank_candidates(
+        "EP\nTEST 100 105 5\n",
+        config=AppConfig(sizing_portfolio_amount=19_250, risk_percent=1.0, market_regime="NO-GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "EP", "mode": "Failing"}]),
+        today=date(2026, 5, 7),
+    )
+
+    assert result.rows[0]["exposure"] == "No Trade"
+    assert result.rows[0]["validation_error"] == "Stop price must be below share price."
 
 
 def test_rank_candidates_enriches_symbol_only_rows_and_records_sources():
@@ -378,8 +401,43 @@ def test_rank_candidates_applies_iex_sizing_cushion_to_alpaca_price_after_manual
     assert row["sizing_price_buffer"] == 0.08
     assert row["stop"] == 29.76
     assert row["stop_source"] == "manual_sl"
-    assert row["shares"] == 110
-    assert row["position_size"] == 3466.10
+    assert row["shares"] == 27
+    assert row["position_size"] == 850.77
+
+
+def test_rank_candidates_uses_buffered_iex_price_for_full_exposure_cap():
+    provider = FakeMarketDataProvider(
+        {
+            "TEST": SimpleNamespace(
+                price=100.0,
+                today_low=99.9,
+                atr_percent=1.0,
+                price_timestamp="2026-05-07T15:59:00Z",
+                low_timestamp="2026-05-07T00:00:00Z",
+                atr_timestamp="2026-05-06T00:00:00Z",
+            )
+        }
+    )
+
+    result = rank_candidates(
+        """
+        BO
+        TEST SL:99.90 1.0
+        """,
+        config=AppConfig(sizing_portfolio_amount=5_000, risk_percent=0.25, market_regime="GO"),
+        strategy_metrics=pd.DataFrame([{"strategy": "BO", "mode": "Working"}]),
+        today=date(2026, 5, 7),
+        enrich=True,
+        feed="iex",
+        market_data_provider=provider,
+    )
+
+    row = result.rows[0]
+    assert row["price"] == 100.1
+    assert row["sizing_price_buffer"] == 0.1
+    assert row["shares"] == 9
+    assert row["position_size"] == 900.9
+    assert row["total_risk"] == 1.8
 
 
 def test_rank_candidates_keeps_strategy_lod_stop_parsing_before_iex_sizing_cushion():
@@ -489,7 +547,7 @@ def test_rank_candidates_does_not_apply_sizing_cushion_to_sip_feeds_or_manual_pr
     assert sip_row["price"] == 31.43
     assert sip_row["raw_price"] is None
     assert sip_row["sizing_price_buffer"] is None
-    assert sip_row["shares"] == 13
+    assert sip_row["shares"] == 6
 
     manual_provider = FakeMarketDataProvider({})
     manual_result = rank_candidates(
@@ -510,7 +568,7 @@ def test_rank_candidates_does_not_apply_sizing_cushion_to_sip_feeds_or_manual_pr
     assert manual_row["price"] == 31.43
     assert manual_row["raw_price"] is None
     assert manual_row["sizing_price_buffer"] is None
-    assert manual_row["shares"] == 13
+    assert manual_row["shares"] == 6
 
 
 def test_rank_candidates_reports_row_level_enrichment_failures_and_continues():
@@ -564,6 +622,7 @@ def test_table_csv_and_json_render_same_ranked_rows():
 
     assert table_header.startswith("Symbol  Regime")
     assert table_header.split()[:4] == ["Symbol", "Regime", "Mode", "Strategy"]
+    assert RANK_TABLE_COLUMNS.index("exposure") == RANK_TABLE_COLUMNS.index("position_size") - 1
     assert "TEST" in table
     assert table.endswith("\n")
     assert csv_header[:14] == [
@@ -592,12 +651,17 @@ def test_table_csv_and_json_render_same_ranked_rows():
         "price_timestamp",
         "stop_timestamp",
         "atr_timestamp",
+        "exposure",
     ]
+    assert csv_header == RANK_MACHINE_COLUMNS
+    assert RANK_MACHINE_COLUMNS[-1] == "exposure"
     assert "TEST" in csv_output
     assert "rows" not in json_payload
     assert list(json_payload["groups"]) == ["EP", "4% BO", "BO", "Pullback"]
     assert json_payload["groups"]["EP"][0]["symbol"] == "TEST"
-    assert json_payload["groups"]["EP"][0]["risk_percent"] == 0.5
+    assert json_payload["groups"]["EP"][0]["risk_percent"] == 0.25
+    assert json_payload["groups"]["EP"][0]["exposure"] == "Half"
+    assert list(json_payload["groups"]["EP"][0])[-1] == "exposure"
     assert "price_source" in json_payload["groups"]["EP"][0]
     assert json_payload["groups"]["4% BO"] == []
     assert json_payload["groups"]["BO"] == []
@@ -658,10 +722,11 @@ def test_storage_load_failure_returns_warning_and_unknown_mode(monkeypatch):
     )
 
     assert result.warnings == [
-        "Could not load strategy history; using Unknown mode for risk sizing. Detail: storage unavailable"
+        "Could not load strategy history; using Unknown mode for exposure sizing. Detail: storage unavailable"
     ]
     assert result.rows[0]["mode"] == "Unknown"
-    assert result.rows[0]["risk_percent"] == 0.06
+    assert result.rows[0]["risk_percent"] == 0.25
+    assert result.rows[0]["exposure"] == "No Trade"
 
 
 class FakeMarketDataProvider:

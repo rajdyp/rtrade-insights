@@ -1,11 +1,15 @@
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from stock_calculator.calculations import (
     CAMPAIGN_OVERRIDE_COLUMNS,
     CAMPAIGN_TRIM_VIEW_COLUMNS,
     CAMPAIGN_VIEW_COLUMNS,
+    DEFAULT_EXPOSURE,
+    EXPOSURE_LEVELS,
+    NO_TRADE_EXPOSURE,
     POSITION_ID_COLUMN,
     POSITION_CAMPAIGN_COLUMNS,
     POSITION_SOURCE_COLUMNS,
@@ -26,6 +30,10 @@ from stock_calculator.calculations import (
     delete_positions_by_index,
     draft_position,
     empty_positions,
+    exposure_cap_message,
+    exposure_capped_positions_message,
+    is_no_trade_result,
+    normalize_exposure,
     normalize_campaign_overrides,
     normalize_position_campaigns,
     percent_of_portfolio,
@@ -56,7 +64,7 @@ def test_calculates_position_size_from_screenshot_values():
     row = result.iloc[0]
     assert row["stop_loss_percent"] == 3.28
     assert pd.isna(row["risk_in_atr"])
-    assert row["risk_amount"] == 100.00
+    assert row["risk_amount"] == 97.50
     assert row["number_of_shares"] == 13
     assert row["sell_lot"] == 4
     assert row["position_size"] == 2970.50
@@ -89,9 +97,118 @@ def test_blank_rows_are_allowed_without_validation_noise():
     row = result.iloc[0]
     assert row["symbol"] == ""
     assert row["validation_error"] == ""
+    assert row["exposure"] == DEFAULT_EXPOSURE
+    assert row["risk_percent"] == 1.0
 
 
-def test_risk_percent_changes_total_risk_and_shares():
+@pytest.mark.parametrize(
+    ("stop_price", "expected_shares", "expected_position_size", "expected_actual_risk_percent"),
+    [
+        (97, 40, 4000, 0.6),
+        (95, 40, 4000, 1.0),
+        (92, 25, 2500, 1.0),
+        (90, 20, 2000, 1.0),
+        (85, 13, 1300, 0.975),
+        (80, 10, 1000, 1.0),
+    ],
+)
+def test_fixed_one_percent_max_risk_across_stop_distances(
+    stop_price, expected_shares, expected_position_size, expected_actual_risk_percent
+):
+    row = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "STOP",
+                    "buy_date": "2026-08-25",
+                    "share_price": 100,
+                    "stop_price": stop_price,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 1.0,
+                    "exposure": "Full",
+                }
+            ]
+        )
+    ).iloc[0]
+
+    assert row["number_of_shares"] == expected_shares
+    assert row["position_size"] == expected_position_size
+    assert row["risk_amount"] / 20_000 * 100 == pytest.approx(expected_actual_risk_percent)
+    assert row["risk_amount"] <= 200
+
+
+def test_probe_exposure_can_be_too_small_for_one_high_priced_share():
+    row = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "HIGH",
+                    "share_price": 600,
+                    "stop_price": 590,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 1.0,
+                    "exposure": "Probe",
+                }
+            ]
+        )
+    ).iloc[0]
+
+    assert row["number_of_shares"] == 0
+    assert row["risk_amount"] == 0
+    assert row["validation_error"] == "Exposure cap is too small to buy one share at this price."
+
+
+def test_no_trade_calculates_stop_metrics_and_returns_zero_sizing():
+    row = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "WAIT",
+                    "buy_date": "2026-08-24",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "atr": 5,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 1.0,
+                    "exposure": NO_TRADE_EXPOSURE,
+                }
+            ]
+        ),
+        as_of=date(2026, 8, 26),
+    ).iloc[0]
+
+    assert row["stop_loss_percent"] == 5.0
+    assert row["risk_in_atr"] == 1.0
+    assert row["hold_count"] == 2
+    assert row["number_of_shares"] == 0
+    assert row["sell_lot"] == 0
+    assert row["position_size"] == 0
+    assert row["risk_amount"] == 0
+    assert row["validation_error"] == 'Exposure matrix recommends "No Trade".'
+    assert is_no_trade_result(row)
+
+
+def test_no_trade_follows_ordinary_input_validation_precedence():
+    row = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "WAIT",
+                    "share_price": 0,
+                    "stop_price": 95,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 1.0,
+                    "exposure": NO_TRADE_EXPOSURE,
+                }
+            ]
+        )
+    ).iloc[0]
+
+    assert row["validation_error"] == "Share price must be greater than 0."
+    assert not is_no_trade_result(row)
+
+
+def test_exposure_cap_limits_shares_and_total_risk():
     result = calculate_positions(
         pd.DataFrame(
             [
@@ -107,9 +224,211 @@ def test_risk_percent_changes_total_risk_and_shares():
     )
 
     row = result.iloc[0]
-    assert row["risk_amount"] == 100
-    assert row["number_of_shares"] == 50
-    assert row["position_size"] == 2500
+    assert row["risk_amount"] == 80
+    assert row["number_of_shares"] == 40
+    assert row["position_size"] == 2000
+
+
+@pytest.mark.parametrize(
+    ("exposure", "expected_shares", "expected_position_size", "expected_risk"),
+    [
+        ("Full", 40, 4000, 40),
+        ("Half", 20, 2000, 20),
+        ("Quarter", 10, 1000, 10),
+        ("Probe", 5, 500, 5),
+    ],
+)
+def test_each_exposure_tier_caps_position_size(
+    exposure, expected_shares, expected_position_size, expected_risk
+):
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "TIER",
+                    "share_price": 100,
+                    "stop_price": 99,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 5,
+                    "exposure": exposure,
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["number_of_shares"] == expected_shares
+    assert row["position_size"] == expected_position_size
+    assert row["risk_amount"] == expected_risk
+    assert row["position_size"] <= 20_000 * (EXPOSURE_LEVELS[exposure] / 100)
+
+
+def test_risk_sizing_remains_binding_when_below_exposure_cap():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "RISK",
+                    "share_price": 100,
+                    "stop_price": 90,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 1,
+                    "exposure": "Full",
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["number_of_shares"] == 20
+    assert row["position_size"] == 2000
+    assert row["risk_amount"] == 200
+
+
+def test_equal_risk_and_exposure_share_limits_do_not_report_a_cap():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "EQUAL",
+                    "share_price": 100,
+                    "stop_price": 99,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.2,
+                    "exposure": "Full",
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["number_of_shares"] == 40
+    assert row["risk_amount"] == 40
+    assert exposure_cap_message(row) is None
+
+
+def test_exposure_cap_rounds_down_to_whole_shares():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "ROUND",
+                    "share_price": 450,
+                    "stop_price": 449,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 5,
+                    "exposure": "Full",
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["number_of_shares"] == 8
+    assert row["position_size"] == 3600
+    assert row["risk_amount"] == 8
+
+
+def test_exposure_cap_below_one_share_returns_zero_outputs():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "PRICEY",
+                    "share_price": 600,
+                    "stop_price": 590,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 1,
+                    "exposure": "Probe",
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["number_of_shares"] == 0
+    assert row["sell_lot"] == 0
+    assert row["position_size"] == 0
+    assert row["risk_amount"] == 0
+    assert row["validation_error"] == "Exposure cap is too small to buy one share at this price."
+
+
+def test_risk_zero_share_error_takes_precedence_when_both_limits_are_zero():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "BOTH",
+                    "share_price": 100,
+                    "stop_price": 90,
+                    "portfolio_amount": 100,
+                    "risk_percent": 1,
+                    "exposure": "Probe",
+                }
+            ]
+        )
+    )
+
+    row = result.iloc[0]
+    assert row["number_of_shares"] == 0
+    assert row["risk_amount"] == 0
+    assert row["validation_error"] == "Risk amount is too small to buy one share at this stop distance."
+
+
+def test_invalid_nonblank_exposure_is_a_validation_error():
+    row = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "BAD",
+                    "share_price": 100,
+                    "stop_price": 95,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 0.5,
+                    "exposure": "Maximum",
+                }
+            ]
+        )
+    ).iloc[0]
+
+    assert pd.isna(row["number_of_shares"])
+    assert row["validation_error"] == "Exposure must be Full, Half, Quarter, Probe, or No Trade."
+
+
+def test_missing_and_blank_exposure_default_to_full_and_known_values_are_canonicalized():
+    result = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "MISSING",
+                    "share_price": 100,
+                    "stop_price": 99,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 5,
+                },
+                {
+                    "symbol": "BLANK",
+                    "share_price": 100,
+                    "stop_price": 99,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 5,
+                    "exposure": "   ",
+                },
+                {
+                    "symbol": "CASE",
+                    "share_price": 100,
+                    "stop_price": 99,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 5,
+                    "exposure": " quarter ",
+                },
+            ]
+        )
+    )
+
+    assert result["exposure"].tolist() == ["Full", "Full", "Quarter"]
+    assert result["number_of_shares"].tolist() == [40, 40, 10]
+    assert normalize_exposure(" probe ") == "Probe"
 
 
 def test_calculates_risk_in_atr_from_atr_percent():
@@ -197,8 +516,51 @@ def test_draft_position_builds_normalized_single_row():
     assert row["buy_date"] == "2026-04-24"
     assert row["share_price"] == 100
     assert pd.isna(row["atr"])
+    assert row["exposure"] == DEFAULT_EXPOSURE
     assert list(draft.columns) == POSITION_SOURCE_COLUMNS
     assert row[POSITION_ID_COLUMN] == ""
+
+
+def test_deterministic_position_id_does_not_change_with_exposure():
+    common = {
+        "symbol": "AAPL",
+        "buy_date": "2026-04-24",
+        "share_price": 100,
+        "stop_price": 95,
+        "portfolio_amount": 20_000,
+        "risk_percent": 0.5,
+    }
+
+    full = committed_positions(pd.DataFrame([{**common, "exposure": "Full"}]))
+    probe = committed_positions(pd.DataFrame([{**common, "exposure": "Probe"}]))
+
+    assert full.iloc[0][POSITION_ID_COLUMN] == probe.iloc[0][POSITION_ID_COLUMN]
+
+
+def test_exposure_cap_feedback_helpers_explain_draft_and_saved_rows():
+    capped = calculate_positions(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "share_price": 100,
+                    "stop_price": 99,
+                    "portfolio_amount": 20_000,
+                    "risk_percent": 5,
+                    "exposure": "Half",
+                }
+            ]
+        )
+    )
+
+    assert exposure_cap_message(capped.iloc[0]) == (
+        "Exposure cap applied: Half (10.00%). Final size: 20 shares.",
+        "ready",
+    )
+    assert exposure_capped_positions_message(capped) == (
+        "Exposure cap applied: AAPL · Half.",
+        "ready",
+    )
 
 
 def test_append_committed_position_adds_valid_draft():
@@ -359,22 +721,22 @@ def test_sell_lot_rounds_down_to_one_third_of_shares():
                     "symbol": "ONE",
                     "share_price": 100,
                     "stop_price": 90,
-                    "portfolio_amount": 100,
-                    "risk_percent": 10,
+                    "portfolio_amount": 500,
+                    "risk_percent": 2,
                 },
                 {
                     "symbol": "TWO",
                     "share_price": 100,
                     "stop_price": 90,
-                    "portfolio_amount": 200,
-                    "risk_percent": 10,
+                    "portfolio_amount": 1000,
+                    "risk_percent": 2,
                 },
                 {
                     "symbol": "THREE",
                     "share_price": 100,
                     "stop_price": 90,
-                    "portfolio_amount": 300,
-                    "risk_percent": 10,
+                    "portfolio_amount": 1500,
+                    "risk_percent": 2,
                 },
                 {
                     "symbol": "THIRTEEN",
@@ -470,7 +832,7 @@ def test_campaign_view_uses_positions_when_robinhood_open_lots_are_missing():
             "sell_lot": 5,
             "position_size": 1372.5,
             "risk_at_campaign_stop": 22.5,
-            "planned_lot_risk": 23.1,
+            "planned_lot_risk": 22.5,
             "strategy": "BO",
             "source": "Positions",
         },
@@ -483,7 +845,7 @@ def test_campaign_view_uses_positions_when_robinhood_open_lots_are_missing():
             "sell_lot": 24,
             "position_size": 3240.46,
             "risk_at_campaign_stop": 0.0,
-            "planned_lot_risk": 215.6,
+            "planned_lot_risk": 211.96,
             "strategy": "Mixed",
             "source": "Positions",
         }
@@ -605,7 +967,7 @@ def test_campaign_view_falls_back_to_position_context_for_missing_robinhood_meta
     assert row["current_shares"] == 66
     assert row["campaign_stop"] == 44
     assert row["sell_lot"] == 22
-    assert row["planned_lot_risk"] == 215.6
+    assert row["planned_lot_risk"] == 211.96
     assert row["strategy"] == "Mixed"
     assert row["source"] == "Hybrid"
 

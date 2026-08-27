@@ -15,9 +15,11 @@ from stock_calculator.calculations import (
     committed_positions,
     ensure_position_ids,
     normalize_campaign_overrides,
+    normalize_exposure,
     normalize_input_frame,
     normalize_position_campaigns,
 )
+from stock_calculator.sizing_policy import EXPOSURE_LEVELS
 from stock_calculator.persistence import frames_equal
 from stock_calculator.risk import normalize_market_regime
 from stock_calculator.robinhood import PLANNED_STOP_COLUMNS, TRANSACTION_COLUMNS, normalize_strategy
@@ -58,6 +60,7 @@ POSITION_ARCHIVE_COLUMNS = [
     "risk_percent",
     "risk_amount",
     "portfolio_amount",
+    "exposure",
 ]
 
 _DEFAULT_BACKEND: StorageBackend | None = None
@@ -169,15 +172,21 @@ class GoogleSheetsStorage:
         return "Google Sheets"
 
     def load_positions(self) -> pd.DataFrame:
-        return committed_positions(self._read_table(POSITIONS_WORKSHEET, POSITION_SOURCE_COLUMNS))
+        source = self._read_table(POSITIONS_WORKSHEET, POSITION_SOURCE_COLUMNS)
+        _validate_stored_exposures(source, context=POSITIONS_WORKSHEET, allow_blank=True)
+        return committed_positions(source)
 
     def save_positions(self, df: pd.DataFrame) -> None:
+        _validate_stored_exposures(df, context=POSITIONS_WORKSHEET, allow_blank=True)
         self._write_table(POSITIONS_WORKSHEET, committed_positions(df), POSITION_SOURCE_COLUMNS)
 
     def load_positions_archive(self) -> pd.DataFrame:
-        return _normalize_positions_archive(self._read_table(POSITIONS_ARCHIVE_WORKSHEET, POSITION_ARCHIVE_COLUMNS))
+        source = self._read_table(POSITIONS_ARCHIVE_WORKSHEET, POSITION_ARCHIVE_COLUMNS)
+        _validate_stored_exposures(source, context=POSITIONS_ARCHIVE_WORKSHEET, allow_blank=True)
+        return _normalize_positions_archive(source)
 
     def save_positions_archive(self, df: pd.DataFrame) -> None:
+        _validate_stored_exposures(df, context=POSITIONS_ARCHIVE_WORKSHEET, allow_blank=True)
         self._write_table(
             POSITIONS_ARCHIVE_WORKSHEET,
             _normalize_positions_archive(df),
@@ -252,6 +261,7 @@ class GoogleSheetsStorage:
         values = _worksheet_values(df, columns)
         row_count = max(len(values), int(worksheet.row_count))
         values.extend([[""] * len(columns) for _ in range(row_count - len(values))])
+        self._ensure_worksheet_capacity(worksheet, rows=len(values), cols=len(columns))
         worksheet.update(values, value_input_option="USER_ENTERED")
 
     def _worksheet(self, title: str, columns: list[str]) -> Any:
@@ -270,7 +280,16 @@ class GoogleSheetsStorage:
 
     @staticmethod
     def _write_headers(worksheet: Any, columns: list[str]) -> None:
+        GoogleSheetsStorage._ensure_worksheet_capacity(worksheet, rows=1, cols=len(columns))
         worksheet.update([columns], value_input_option="USER_ENTERED")
+
+    @staticmethod
+    def _ensure_worksheet_capacity(worksheet: Any, *, rows: int, cols: int) -> None:
+        target_rows = max(int(worksheet.row_count), rows)
+        target_cols = max(int(worksheet.col_count), cols)
+        if target_rows == int(worksheet.row_count) and target_cols == int(worksheet.col_count):
+            return
+        worksheet.resize(rows=target_rows, cols=target_cols)
 
 
 def get_storage_backend() -> StorageBackend:
@@ -417,23 +436,31 @@ def save_robinhood_transactions(df: pd.DataFrame, path: Path | None = None) -> N
 def _load_positions_csv(path: Path = DATA_PATH) -> pd.DataFrame:
     if not path.exists():
         return normalize_input_frame(pd.DataFrame(columns=POSITION_SOURCE_COLUMNS))
-    return committed_positions(pd.read_csv(path))
+    source = pd.read_csv(path)
+    _validate_stored_exposures(source, context=str(path), allow_blank=True)
+    return committed_positions(source)
 
 
 def _save_positions_csv(df: pd.DataFrame, path: Path = DATA_PATH) -> None:
+    _validate_stored_exposures(df, context=str(path), allow_blank=True)
+    normalized = committed_positions(df)
     path.parent.mkdir(parents=True, exist_ok=True)
-    committed_positions(df).to_csv(path, index=False, columns=POSITION_SOURCE_COLUMNS)
+    normalized.to_csv(path, index=False, columns=POSITION_SOURCE_COLUMNS)
 
 
 def _load_positions_archive_csv(path: Path = POSITIONS_ARCHIVE_PATH) -> pd.DataFrame:
     if not path.exists():
         return _normalize_positions_archive(pd.DataFrame(columns=POSITION_ARCHIVE_COLUMNS))
-    return _normalize_positions_archive(pd.read_csv(path))
+    source = pd.read_csv(path)
+    _validate_stored_exposures(source, context=str(path), allow_blank=True)
+    return _normalize_positions_archive(source)
 
 
 def _save_positions_archive_csv(df: pd.DataFrame, path: Path = POSITIONS_ARCHIVE_PATH) -> None:
+    _validate_stored_exposures(df, context=str(path), allow_blank=True)
+    normalized = _normalize_positions_archive(df)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _normalize_positions_archive(df).to_csv(path, index=False, columns=POSITION_ARCHIVE_COLUMNS)
+    normalized.to_csv(path, index=False, columns=POSITION_ARCHIVE_COLUMNS)
 
 
 def _load_campaign_overrides_csv(path: Path = CAMPAIGN_OVERRIDES_PATH) -> pd.DataFrame:
@@ -579,6 +606,8 @@ def _normalize_positions_archive(df: pd.DataFrame) -> pd.DataFrame:
     normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
     normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
     normalized["strategy"] = normalized["strategy"].apply(normalize_strategy)
+    # Historical archive rows predate Exposure; keep them blank to preserve their legacy risk semantics.
+    normalized["exposure"] = normalized["exposure"].apply(normalize_exposure)
 
     for column in [
         "share_price",
@@ -599,6 +628,24 @@ def _normalize_positions_archive(df: pd.DataFrame) -> pd.DataFrame:
     normalized = normalized[normalized["symbol"] != ""].reset_index(drop=True)
     normalized = ensure_position_ids(normalized)
     return normalized[POSITION_ARCHIVE_COLUMNS]
+
+
+def _validate_stored_exposures(df: pd.DataFrame, *, context: str, allow_blank: bool) -> None:
+    if "exposure" not in df.columns:
+        return
+
+    for index, value in df["exposure"].items():
+        if value is None or pd.isna(value) or not str(value).strip():
+            if allow_blank:
+                continue
+        normalized = normalize_exposure(value)
+        if normalized not in EXPOSURE_LEVELS:
+            row_number = int(index) + 2 if isinstance(index, int) else index
+            allowed = ", ".join(EXPOSURE_LEVELS)
+            raise StorageError(
+                f"{context} row {row_number} has invalid Exposure {value!r}. "
+                f"Persisted Exposure must be {allowed}; blank legacy values are also accepted."
+            )
 
 
 def _normalize_planned_stops(df: pd.DataFrame) -> pd.DataFrame:

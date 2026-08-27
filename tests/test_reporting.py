@@ -79,7 +79,7 @@ def test_strategy_report_metrics_use_year_performance_and_full_history_sizing_si
     assert row["total_realized_pnl"] == -50.0
     assert row["win_rate"] == 0.0
     assert row["mode"] == "Working"
-    assert row["action"] == "Normal size"
+    assert row["action"] == "Use regime baseline"
     assert row["rolling_mode_exp"] == "+1.00R"
 
 

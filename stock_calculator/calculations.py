@@ -9,10 +9,30 @@ from typing import Any
 
 import pandas as pd
 
+from stock_calculator.sizing_policy import (
+    DEFAULT_EXPOSURE,
+    EXPOSURE_LEVELS,
+    NO_TRADE_EXPOSURE,
+    NO_TRADE_VALIDATION_ERROR,
+    normalize_exposure as normalize_policy_exposure,
+)
+
 
 POSITION_ID_COLUMN = "position_id"
 
 INPUT_COLUMNS = [
+    "symbol",
+    "buy_date",
+    "share_price",
+    "stop_price",
+    "atr",
+    "portfolio_amount",
+    "risk_percent",
+    "exposure",
+]
+
+# Keep legacy deterministic IDs stable when new editable inputs are introduced.
+POSITION_IDENTITY_COLUMNS = [
     "symbol",
     "buy_date",
     "share_price",
@@ -51,6 +71,7 @@ PUBLIC_OUTPUT_COLUMNS = [
     "risk_percent",
     "risk_amount",
     "portfolio_amount",
+    "exposure",
 ]
 
 POSITION_CAMPAIGN_COLUMNS = [
@@ -159,7 +180,8 @@ def empty_positions(rows: int = 8) -> pd.DataFrame:
                 "stop_price": None,
                 "atr": None,
                 "portfolio_amount": 20_000.0,
-                "risk_percent": 0.50,
+                "risk_percent": 1.00,
+                "exposure": DEFAULT_EXPOSURE,
             }
             for _ in range(rows)
         ],
@@ -177,6 +199,9 @@ def normalize_input_frame(df: pd.DataFrame) -> pd.DataFrame:
     normalized[POSITION_ID_COLUMN] = normalized[POSITION_ID_COLUMN].fillna("").astype(str).str.strip()
     normalized["symbol"] = normalized["symbol"].fillna("").astype(str).str.upper().str.strip()
     normalized["buy_date"] = normalized["buy_date"].fillna("").astype(str).str.strip()
+    normalized["exposure"] = normalized["exposure"].apply(
+        lambda value: normalize_exposure(value, blank_default=DEFAULT_EXPOSURE)
+    )
 
     for column in ["share_price", "stop_price", "atr", "portfolio_amount", "risk_percent"]:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
@@ -244,6 +269,7 @@ def draft_position(
     portfolio_amount: float | None,
     risk_percent: float | None,
     atr: float | None = None,
+    exposure: str = DEFAULT_EXPOSURE,
 ) -> pd.DataFrame:
     return normalize_input_frame(
         pd.DataFrame(
@@ -256,6 +282,7 @@ def draft_position(
                     "atr": atr,
                     "portfolio_amount": portfolio_amount,
                     "risk_percent": risk_percent,
+                    "exposure": exposure,
                 }
             ]
         )
@@ -285,6 +312,7 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
     atr = _to_float(row.get("atr"))
     portfolio_amount = _to_float(row.get("portfolio_amount"))
     risk_percent = _to_float(row.get("risk_percent"))
+    exposure = str(row.get("exposure") or "").strip()
     hold_count = weekday_hold_count(row.get("buy_date"), as_of=as_of)
 
     if not symbol:
@@ -299,18 +327,42 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
         return PositionCalculation(None, None, None, None, hold_count, None, None, "Portfolio amount must be greater than 0.")
     if risk_percent is None or risk_percent <= 0:
         return PositionCalculation(None, None, None, None, hold_count, None, None, "Risk percent must be greater than 0.")
+    if exposure != NO_TRADE_EXPOSURE and exposure not in EXPOSURE_LEVELS:
+        return PositionCalculation(
+            None,
+            None,
+            None,
+            None,
+            hold_count,
+            None,
+            None,
+            "Exposure must be Full, Half, Quarter, Probe, or No Trade.",
+        )
 
     risk_per_share = share_price - stop_price
     stop_loss_percent = round((risk_per_share / share_price) * 100, 2)
     risk_in_atr = round(stop_loss_percent / atr, 2) if atr is not None and atr > 0 else None
-    risk_amount = portfolio_amount * (risk_percent / 100)
-    number_of_shares = int(risk_amount // risk_per_share)
 
-    if number_of_shares <= 0:
+    if exposure == NO_TRADE_EXPOSURE:
         return PositionCalculation(
             stop_loss_percent,
             risk_in_atr,
-            round(risk_amount, 2),
+            0.0,
+            0,
+            hold_count,
+            0,
+            0.0,
+            NO_TRADE_VALIDATION_ERROR,
+        )
+
+    risk_budget = portfolio_amount * (risk_percent / 100)
+    risk_shares = int(risk_budget // risk_per_share)
+
+    if risk_shares <= 0:
+        return PositionCalculation(
+            stop_loss_percent,
+            risk_in_atr,
+            0.0,
             0,
             hold_count,
             0,
@@ -318,7 +370,23 @@ def calculate_position(row: pd.Series, *, as_of: date | None = None) -> Position
             "Risk amount is too small to buy one share at this stop distance.",
         )
 
+    exposure_cap = portfolio_amount * (EXPOSURE_LEVELS[exposure] / 100)
+    exposure_shares = int(exposure_cap // share_price)
+    if exposure_shares <= 0:
+        return PositionCalculation(
+            stop_loss_percent,
+            risk_in_atr,
+            0.0,
+            0,
+            hold_count,
+            0,
+            0.0,
+            "Exposure cap is too small to buy one share at this price.",
+        )
+
+    number_of_shares = min(risk_shares, exposure_shares)
     position_size = number_of_shares * share_price
+    risk_amount = number_of_shares * risk_per_share
 
     return PositionCalculation(
         stop_loss_percent=stop_loss_percent,
@@ -341,6 +409,71 @@ def calculate_positions(df: pd.DataFrame, *, as_of: date | None = None) -> pd.Da
         result[field] = [getattr(calculation, field) for calculation in calculations]
 
     return result[OUTPUT_COLUMNS]
+
+
+def normalize_exposure(value: Any, *, blank_default: str = "") -> str:
+    if value is None or pd.isna(value):
+        return blank_default
+    return normalize_policy_exposure(value, blank_default=blank_default)
+
+
+def is_no_trade_result(row: pd.Series) -> bool:
+    return (
+        normalize_exposure(row.get("exposure")) == NO_TRADE_EXPOSURE
+        and str(row.get("validation_error") or "") == NO_TRADE_VALIDATION_ERROR
+    )
+
+
+def exposure_cap_applied(row: pd.Series) -> bool:
+    if str(row.get("validation_error") or ""):
+        return False
+
+    share_price = _to_float(row.get("share_price"))
+    stop_price = _to_float(row.get("stop_price"))
+    portfolio_amount = _to_float(row.get("portfolio_amount"))
+    risk_percent = _to_float(row.get("risk_percent"))
+    exposure = normalize_exposure(row.get("exposure"), blank_default=DEFAULT_EXPOSURE)
+    if (
+        share_price is None
+        or stop_price is None
+        or portfolio_amount is None
+        or risk_percent is None
+        or share_price <= 0
+        or stop_price <= 0
+        or stop_price >= share_price
+        or portfolio_amount <= 0
+        or risk_percent <= 0
+        or exposure not in EXPOSURE_LEVELS
+    ):
+        return False
+
+    risk_shares = int((portfolio_amount * (risk_percent / 100)) // (share_price - stop_price))
+    exposure_shares = int((portfolio_amount * (EXPOSURE_LEVELS[exposure] / 100)) // share_price)
+    return exposure_shares > 0 and exposure_shares < risk_shares
+
+
+def exposure_cap_message(row: pd.Series) -> tuple[str, str] | None:
+    if not exposure_cap_applied(row):
+        return None
+
+    exposure = normalize_exposure(row.get("exposure"), blank_default=DEFAULT_EXPOSURE)
+    shares = int(_to_float(row.get("number_of_shares")) or 0)
+    return (
+        f"Exposure cap applied: {exposure} ({format_percent(EXPOSURE_LEVELS[exposure])}). Final size: {shares} shares.",
+        "ready",
+    )
+
+
+def exposure_capped_positions_message(positions: pd.DataFrame) -> tuple[str, str] | None:
+    labels = [
+        f"{str(row.get('symbol') or '').upper().strip()} · "
+        f"{normalize_exposure(row.get('exposure'), blank_default=DEFAULT_EXPOSURE)}"
+        for _, row in positions.iterrows()
+        if exposure_cap_applied(row)
+    ]
+    if not labels:
+        return None
+    return ("Exposure cap applied: " + "; ".join(labels) + ".", "ready")
 
 
 def risk_neutral_add_on(
@@ -951,7 +1084,7 @@ def _new_position_id(
 
 
 def _deterministic_position_id(row: pd.Series) -> str:
-    values = [str(row.get(column) or "").strip() for column in INPUT_COLUMNS]
+    values = [str(row.get(column) or "").strip() for column in POSITION_IDENTITY_COLUMNS]
     digest = hashlib.sha1("|".join(values).encode("utf-8")).hexdigest()[:12]
     return f"pos_{digest}"
 
