@@ -7,6 +7,7 @@ Personal Streamlit dashboard and local workflow tools for trade planning, positi
 - Sizes positions from entry price, stop price, portfolio size, and risk percent, then applies a selected exposure cap.
 - Tracks active positions and calculated risk metrics in an editable Streamlit table.
 - Imports Robinhood CSV reports to derive FIFO exit matches, open lots, closed trades, realized P/L, and strategy metrics.
+- Summarizes completed trades by month and charts their yearly return distribution.
 - Preserves planned stops, strategy tags, ATR %, and market-regime context for later trade analysis.
 - Ranks new trade candidates by strategy through a local CLI or FastAPI endpoint.
 

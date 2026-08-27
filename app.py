@@ -63,17 +63,24 @@ from stock_calculator.risk import (
 from stock_calculator.sizing_policy import resolve_draft_exposure
 from stock_calculator.reporting import (
     ALL_TIME_LABEL,
+    MONTHLY_TRACKER_HIDDEN,
+    MONTHLY_TRACKER_READY,
     calculate_strategy_report_metrics,
+    calculate_monthly_trade_tracker,
+    calculate_trade_return_distribution,
     default_report_year_label,
     filter_frame_by_year,
     report_scope_label,
     report_year_options,
     report_year_value,
+    monthly_tracker_state,
+    trade_return_distribution_caption,
 )
 from stock_calculator.strategy_attribution_display import (
     strategy_attribution_display_strategies,
     strategy_attribution_strategy_frame,
 )
+from stock_calculator.trade_tracker_display import build_trade_return_distribution_chart
 from stock_calculator.storage import (
     POSITION_ARCHIVE_COLUMNS,
     StorageError,
@@ -133,6 +140,7 @@ ROBINHOOD_TABLE_HEADER_HEIGHT = 36
 ROBINHOOD_TABLE_ROW_HEIGHT = 35
 ROBINHOOD_TABLE_BORDER_ALLOWANCE = 3
 ROBINHOOD_TABLE_MAX_VISIBLE_ROWS = 10
+MONTHLY_TRACKER_MAX_VISIBLE_ROWS = 6
 LAST_ARCHIVED_INPUT_KEY = "last_archived_positions_input"
 
 
@@ -892,8 +900,8 @@ def positions_editor_height(row_count: int) -> int:
     )
 
 
-def robinhood_dataframe_height(row_count: int) -> int:
-    visible_rows = max(1, min(int(row_count), ROBINHOOD_TABLE_MAX_VISIBLE_ROWS))
+def robinhood_dataframe_height(row_count: int, max_visible_rows: int = ROBINHOOD_TABLE_MAX_VISIBLE_ROWS) -> int:
+    visible_rows = max(1, min(int(row_count), max_visible_rows))
     return (
         ROBINHOOD_TABLE_HEADER_HEIGHT
         + (visible_rows * ROBINHOOD_TABLE_ROW_HEIGHT)
@@ -1062,6 +1070,36 @@ def strategy_metrics_column_config() -> dict:
     }
 
 
+def monthly_trade_tracker_column_config() -> dict:
+    return {
+        "month": st.column_config.TextColumn("Month", width=66),
+        "average_gain_percent": st.column_config.NumberColumn("Avg Gain", format="%.2f%%", width=84),
+        "average_loss_percent": st.column_config.NumberColumn("Avg Loss", format="%.2f%%", width=84),
+        "win_loss_ratio": st.column_config.NumberColumn(
+            "Win/Loss Ratio",
+            help="Average gain % divided by the absolute average loss %.",
+            format="%.2f",
+            width=104,
+        ),
+        "win_rate": st.column_config.NumberColumn("Win %", format="%.1f%%", width=72),
+        "adjusted_win_loss_ratio": st.column_config.NumberColumn(
+            "Adjusted Win/Loss Ratio",
+            help="(Average gain % × winning-trade %) ÷ (absolute average loss % × losing-trade %).",
+            format="%.2f",
+            width=142,
+        ),
+        "trade_count": st.column_config.NumberColumn("Trades", format="%d", width=62),
+        "largest_gain_percent": st.column_config.NumberColumn("Largest Gain", format="%.2f%%", width=96),
+        "largest_loss_percent": st.column_config.NumberColumn("Largest Loss", format="%.2f%%", width=96),
+        "average_gain_hold_days": st.column_config.NumberColumn(
+            "Avg Gain Hold (Weekdays)", format="%.1f", width=132
+        ),
+        "average_loss_hold_days": st.column_config.NumberColumn(
+            "Avg Loss Hold (Weekdays)", format="%.1f", width=132
+        ),
+    }
+
+
 def strategy_attribution_tab_column_config(strategy: str) -> dict:
     return {
         "Metric": st.column_config.TextColumn("Metric", width=132),
@@ -1088,10 +1126,37 @@ def render_strategy_attribution(strategy_attribution: pd.DataFrame | None) -> No
                 )
 
 
+def render_monthly_trade_tracker(closed_trades: pd.DataFrame, scope_label: str) -> None:
+    state = monthly_tracker_state(closed_trades, scope_label)
+    if state == MONTHLY_TRACKER_HIDDEN:
+        return
+
+    title = "Monthly Trade Tracker" if scope_label == ALL_TIME_LABEL else f"Monthly Trade Tracker — {scope_label}"
+    with st.expander(title, expanded=False):
+        if state != MONTHLY_TRACKER_READY:
+            render_feedback("Select a specific year to view monthly results.", "idle")
+            return
+
+        monthly_tracker = calculate_monthly_trade_tracker(closed_trades)
+        st.dataframe(
+            monthly_tracker,
+            column_config=monthly_trade_tracker_column_config(),
+            height=robinhood_dataframe_height(len(monthly_tracker), MONTHLY_TRACKER_MAX_VISIBLE_ROWS),
+            hide_index=True,
+            width="stretch",
+        )
+
+        distribution = calculate_trade_return_distribution(closed_trades)
+        if distribution.valid_return_count:
+            st.altair_chart(build_trade_return_distribution_chart(distribution.bins), width="content")
+        st.caption(trade_return_distribution_caption(distribution))
+
+
 def render_trade_metrics(
     metrics: dict | None,
     strategy_metrics: pd.DataFrame | None,
     strategy_attribution: pd.DataFrame | None,
+    closed_trades: pd.DataFrame,
     scope_label: str,
     strategy_scope: str,
 ) -> None:
@@ -1137,6 +1202,8 @@ def render_trade_metrics(
                 continue
             label, value = metric_value
             column.metric(label, value)
+
+    render_monthly_trade_tracker(closed_trades, scope_label)
 
     if strategy_metrics is None or strategy_metrics.empty:
         render_feedback("No strategy breakdown is available yet.", "idle")
@@ -1719,4 +1786,11 @@ with st.expander("Robinhood Import", expanded=False):
             )
 
 with trade_metrics_container:
-    render_trade_metrics(trade_metrics, strategy_metrics, strategy_attribution, scope_label, strategy_scope)
+    render_trade_metrics(
+        trade_metrics,
+        strategy_metrics,
+        strategy_attribution,
+        report_closed_trades,
+        scope_label,
+        strategy_scope,
+    )
