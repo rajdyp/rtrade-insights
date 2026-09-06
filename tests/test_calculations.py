@@ -31,15 +31,17 @@ from stock_calculator.calculations import (
     draft_position,
     empty_positions,
     exposure_cap_message,
-    exposure_capped_positions_message,
+    format_position_risk,
     is_no_trade_result,
     normalize_exposure,
     normalize_campaign_overrides,
     normalize_position_campaigns,
     percent_of_portfolio,
+    position_ready_message,
     prospective_symbol_exposure_breach,
     risk_neutral_add_on,
     risk_neutral_add_on_message,
+    stop_loss_exceeds_atr,
     symbol_exposure_breaches,
     weekday_hold_count,
 )
@@ -537,7 +539,7 @@ def test_deterministic_position_id_does_not_change_with_exposure():
     assert full.iloc[0][POSITION_ID_COLUMN] == probe.iloc[0][POSITION_ID_COLUMN]
 
 
-def test_exposure_cap_feedback_helpers_explain_draft_and_saved_rows():
+def test_exposure_cap_feedback_explains_draft_sizing():
     capped = calculate_positions(
         pd.DataFrame(
             [
@@ -557,10 +559,53 @@ def test_exposure_cap_feedback_helpers_explain_draft_and_saved_rows():
         "Exposure cap applied: Half (10.00%). Final size: 20 shares.",
         "ready",
     )
-    assert exposure_capped_positions_message(capped) == (
-        "Exposure cap applied: AAPL · Half.",
-        "ready",
+
+
+@pytest.mark.parametrize(
+    ("stop_loss_percent", "atr", "expected"),
+    [
+        (5.01, 5.0, True),
+        (5.0, 5.0, False),
+        (4.99, 5.0, False),
+        (5.0, 0, False),
+        (5.0, None, False),
+        (None, 5.0, False),
+    ],
+)
+def test_stop_loss_exceeds_atr_requires_positive_atr_and_strictly_wider_stop(
+    stop_loss_percent, atr, expected
+):
+    row = pd.Series({"stop_loss_percent": stop_loss_percent, "atr": atr})
+
+    assert stop_loss_exceeds_atr(row) is expected
+
+
+def test_position_ready_message_warns_when_stop_exceeds_atr():
+    row = pd.Series({"stop_loss_percent": 5.0, "atr": 4.0})
+
+    assert position_ready_message(row) == (
+        "Position is ready to add, but stop loss exceeds ATR.",
+        "warning",
     )
+
+
+def test_position_ready_message_is_ready_when_stop_does_not_exceed_atr():
+    row = pd.Series({"stop_loss_percent": 4.0, "atr": 4.0})
+
+    assert position_ready_message(row) == ("Position is ready to add.", "ready")
+
+
+def test_format_position_risk_includes_portfolio_percentage():
+    assert format_position_risk(18.08, 19_250) == "$18.08 (0.09%)"
+
+
+def test_format_position_risk_rounds_percentage_to_two_decimals():
+    assert format_position_risk(53.60, 19_250) == "$53.60 (0.28%)"
+
+
+def test_format_position_risk_handles_missing_risk_or_invalid_portfolio():
+    assert format_position_risk(None, 19_250) == ""
+    assert format_position_risk(18.08, 0) == "$18.08"
 
 
 def test_append_committed_position_adds_valid_draft():
