@@ -464,16 +464,21 @@ def exposure_cap_message(row: pd.Series) -> tuple[str, str] | None:
     )
 
 
-def exposure_capped_positions_message(positions: pd.DataFrame) -> tuple[str, str] | None:
-    labels = [
-        f"{str(row.get('symbol') or '').upper().strip()} · "
-        f"{normalize_exposure(row.get('exposure'), blank_default=DEFAULT_EXPOSURE)}"
-        for _, row in positions.iterrows()
-        if exposure_cap_applied(row)
-    ]
-    if not labels:
-        return None
-    return ("Exposure cap applied: " + "; ".join(labels) + ".", "ready")
+def stop_loss_exceeds_atr(row: pd.Series) -> bool:
+    stop_loss_percent = _to_float(row.get("stop_loss_percent"))
+    atr_percent = _to_float(row.get("atr"))
+    return (
+        stop_loss_percent is not None
+        and atr_percent is not None
+        and atr_percent > 0
+        and stop_loss_percent > atr_percent
+    )
+
+
+def position_ready_message(row: pd.Series) -> tuple[str, str]:
+    if stop_loss_exceeds_atr(row):
+        return "Position is ready to add, but stop loss exceeds ATR.", "warning"
+    return "Position is ready to add.", "ready"
 
 
 def risk_neutral_add_on(
@@ -1184,6 +1189,17 @@ def format_percent(value: Any) -> str:
     if number is None:
         return ""
     return f"{number:.2f}%"
+
+
+def format_position_risk(risk_amount: Any, portfolio_amount: Any) -> str:
+    currency = format_currency(risk_amount)
+    if not currency:
+        return ""
+
+    risk_percent = percent_of_portfolio(risk_amount, portfolio_amount)
+    if risk_percent is None:
+        return currency
+    return f"{currency} ({format_percent(risk_percent)})"
 
 
 def _to_float(value: Any) -> float | None:

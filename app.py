@@ -24,10 +24,11 @@ from stock_calculator.calculations import (
     delete_positions_by_index,
     draft_position,
     exposure_cap_message,
-    exposure_capped_positions_message,
     format_currency,
+    format_position_risk,
     format_percent,
     percent_of_portfolio,
+    position_ready_message,
     prospective_symbol_exposure_breach,
     risk_neutral_add_on,
     risk_neutral_add_on_message,
@@ -107,6 +108,7 @@ from stock_calculator.storage import (
 st.set_page_config(page_title="Stock Calculator", layout="wide")
 
 DELETE_COLUMN = "delete_selected"
+POSITION_RISK_DISPLAY_COLUMN = "risk_display"
 POSITION_EDITOR_COLUMNS = [
     "symbol",
     "buy_date",
@@ -121,7 +123,7 @@ POSITION_EDITOR_COLUMNS = [
     "hold_count",
     "position_size",
     "risk_percent",
-    "risk_amount",
+    POSITION_RISK_DISPLAY_COLUMN,
     "portfolio_amount",
     "exposure",
 ]
@@ -167,7 +169,7 @@ def apply_styles() -> None:
             --app-grid: color-mix(in srgb, var(--st-border-color), transparent 50%);
             --app-success: var(--st-green-color);
             --app-success-soft: var(--st-green-background-color);
-            --app-error: var(--st-red-color);
+            --app-error: var(--st-red-color, #d32f2f);
             --app-error-soft: var(--st-red-background-color);
             --app-warning: var(--st-orange-color, #d97706);
             --app-warning-soft: var(--st-orange-background-color, #fff7ed);
@@ -592,26 +594,26 @@ def apply_styles() -> None:
 
 def positions_column_config() -> dict:
     return {
-        "symbol": st.column_config.TextColumn("Symbol", width=72),
+        "symbol": st.column_config.TextColumn("Symbol", width=82),
         "buy_date": st.column_config.DateColumn("Buy Date", format="MM/DD/YYYY", width=96),
-        "share_price": st.column_config.NumberColumn("Share Price", format="$%.2f", width=94),
-        "stop_price": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=88),
-        "atr": st.column_config.NumberColumn("ATR %", format="%.2f", width=58),
-        "risk_in_atr": st.column_config.NumberColumn("Risk (ATR)", format="%.2f", width=82),
+        "share_price": st.column_config.NumberColumn("Share Price", format="$%.2f", width=108),
+        "stop_price": st.column_config.NumberColumn("Stop Price", format="$%.2f", width=104),
+        "atr": st.column_config.NumberColumn("ATR %", format="%.2f", width=72),
+        "risk_in_atr": st.column_config.NumberColumn("Risk (ATR)", format="%.2f", width=78),
         "strategy": st.column_config.SelectboxColumn(
             "Strategy",
             options=[*STRATEGY_OPTIONS, UNCLASSIFIED_STRATEGY],
             width=82,
         ),
-        "stop_loss_percent": st.column_config.NumberColumn("Stop Loss", format="%.2f%%", width=78),
-        "number_of_shares": st.column_config.NumberColumn("Shares", width=68),
-        "sell_lot": st.column_config.NumberColumn("Sell Lot", width=68),
-        "hold_count": st.column_config.NumberColumn("Hold Days", width=74),
-        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=104),
-        "risk_percent": st.column_config.NumberColumn("Max Risk %", format="%.2f%%", width=82),
-        "risk_amount": st.column_config.NumberColumn("Total Risk", format="$%.2f", width=96),
-        "portfolio_amount": st.column_config.NumberColumn("Portfolio", format="$%.2f", width=104),
-        "exposure": st.column_config.SelectboxColumn("Exposure", options=list(EXPOSURE_LEVELS), width=82),
+        "stop_loss_percent": st.column_config.NumberColumn("Stop Loss", format="%.2f%%", width=72),
+        "number_of_shares": st.column_config.NumberColumn("Shares", width=56),
+        "sell_lot": st.column_config.NumberColumn("Sell Lot", width=62),
+        "hold_count": st.column_config.NumberColumn("Hold Days", width=70),
+        "position_size": st.column_config.NumberColumn("Position Size", format="$%.2f", width=90),
+        "risk_percent": st.column_config.NumberColumn("Max Risk %", format="%.2f%%", width=76),
+        POSITION_RISK_DISPLAY_COLUMN: st.column_config.TextColumn("Total Risk", width=126),
+        "portfolio_amount": st.column_config.NumberColumn("Portfolio", format="$%.2f", width=96),
+        "exposure": st.column_config.SelectboxColumn("Exposure", options=list(EXPOSURE_LEVELS), width=78),
         DELETE_COLUMN: st.column_config.CheckboxColumn("x", width=38, default=False),
     }
 
@@ -683,6 +685,10 @@ def editor_frame(df: pd.DataFrame) -> pd.DataFrame:
 def positions_editor_frame(positions: pd.DataFrame, planned_stops: pd.DataFrame) -> pd.DataFrame:
     frame = positions.copy()
     frame["strategy"] = [planned_strategy(row, planned_stops) for _, row in frame.iterrows()]
+    frame[POSITION_RISK_DISPLAY_COLUMN] = frame.apply(
+        lambda row: format_position_risk(row.get("risk_amount"), row.get("portfolio_amount")),
+        axis=1,
+    )
     return editor_frame(frame[POSITION_EDITOR_COLUMNS])
 
 
@@ -1437,6 +1443,7 @@ preview_cols[3].metric("Position Size", format_currency(first_value(draft_result
 draft_risk_percent = percent_of_portfolio(draft_row["risk_amount"], draft_row["portfolio_amount"])
 preview_cols[4].metric("Total Risk", format_currency_percent_pair(draft_row["risk_amount"], draft_risk_percent))
 
+feedback_status = "ready"
 if draft_error:
     feedback_message = draft_error
 elif draft_exposure_breach is not None:
@@ -1447,13 +1454,13 @@ elif draft_exposure_breach is not None:
         f"> {format_percent(config.max_symbol_exposure_percent)}."
     )
 elif symbol:
-    feedback_message = "Position is ready to add."
+    feedback_message, feedback_status = position_ready_message(draft_row)
 else:
     feedback_message = "Enter a symbol and prices to preview the position."
 
 action_cols = st.columns([1.5, 1, 1.5])
 with action_cols[0]:
-    render_feedback(feedback_message, "ready")
+    render_feedback(feedback_message, feedback_status)
     if draft_exposure_message is not None:
         render_feedback(draft_exposure_message[0], "ready")
     if risk_neutral_message is not None:
@@ -1472,8 +1479,6 @@ exposure_breaches = symbol_exposure_breaches(
     portfolio_amount=config.sizing_portfolio_amount,
     max_symbol_exposure_percent=config.max_symbol_exposure_percent,
 )
-active_exposure_message = exposure_capped_positions_message(visible_calculated)
-
 render_section("Positions", "Saved source fields remain editable; Exposure and calculated columns are read-only.")
 
 summary_cols = st.columns([1, 1.15, 1, 1])
@@ -1503,9 +1508,6 @@ if not exposure_breaches.empty:
         + f"; configured limit is {format_percent(config.max_symbol_exposure_percent)}.",
         "ready",
     )
-
-if active_exposure_message is not None:
-    render_feedback(active_exposure_message[0], active_exposure_message[1])
 
 if visible_calculated.empty:
     render_feedback("No positions yet. Add a valid position from the calculator above to start the list.", "idle")
