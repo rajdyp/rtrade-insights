@@ -605,6 +605,7 @@ def test_format_position_risk_rounds_percentage_to_two_decimals():
 
 def test_format_position_risk_handles_missing_risk_or_invalid_portfolio():
     assert format_position_risk(None, 19_250) == ""
+    assert format_position_risk(float("nan"), 19_250) == ""
     assert format_position_risk(18.08, 0) == "$18.08"
 
 
