@@ -39,6 +39,7 @@ from stock_calculator.calculations import (
     percent_of_portfolio,
     position_ready_message,
     prospective_symbol_exposure_breach,
+    risk_budget_progress,
     risk_neutral_add_on,
     risk_neutral_add_on_message,
     stop_loss_exceeds_atr,
@@ -607,6 +608,32 @@ def test_format_position_risk_handles_missing_risk_or_invalid_portfolio():
     assert format_position_risk(None, 19_250) == ""
     assert format_position_risk(float("nan"), 19_250) == ""
     assert format_position_risk(18.08, 0) == "$18.08"
+
+
+def test_risk_budget_progress_calculates_fraction_of_maximum_risk():
+    assert risk_budget_progress(95, 19_250, 1.0) == pytest.approx(95 / 192.50)
+
+
+def test_risk_budget_progress_handles_zero_and_caps_over_limit_values():
+    assert risk_budget_progress(0, 19_250, 1.0) == 0
+    assert risk_budget_progress(250, 20_000, 1.0) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("risk_amount", "portfolio_amount", "risk_percent"),
+    [
+        (None, 19_250, 1.0),
+        (float("nan"), 19_250, 1.0),
+        (-1, 19_250, 1.0),
+        (95, None, 1.0),
+        (95, 0, 1.0),
+        (95, 19_250, None),
+        (95, 19_250, 0),
+        (95, 1e308, 1e308),
+    ],
+)
+def test_risk_budget_progress_rejects_invalid_inputs(risk_amount, portfolio_amount, risk_percent):
+    assert risk_budget_progress(risk_amount, portfolio_amount, risk_percent) is None
 
 
 def test_append_committed_position_adds_valid_draft():

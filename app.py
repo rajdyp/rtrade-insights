@@ -30,6 +30,7 @@ from stock_calculator.calculations import (
     percent_of_portfolio,
     position_ready_message,
     prospective_symbol_exposure_breach,
+    risk_budget_progress,
     risk_neutral_add_on,
     risk_neutral_add_on_message,
     symbol_exposure_breaches,
@@ -374,6 +375,10 @@ def apply_styles() -> None:
             font-weight: 400 !important;
             line-height: 1.2 !important;
             letter-spacing: -0.01em !important;
+        }
+
+        .st-key-draft-risk-progress {
+            padding-left: 0.9rem;
         }
 
         /* ── Inputs ──────────────────────────────────────────── */
@@ -1441,6 +1446,17 @@ preview_cols[1].metric("Risk in ATR", format_blank_optional_number(first_value(d
 preview_cols[2].metric("Shares", "" if pd.isna(draft_row["number_of_shares"]) else int(draft_row["number_of_shares"]))
 preview_cols[3].metric("Position Size", format_currency(first_value(draft_result, "position_size")))
 preview_cols[4].metric("Total Risk", format_position_risk(draft_row["risk_amount"], draft_row["portfolio_amount"]))
+draft_risk_progress = risk_budget_progress(
+    draft_row["risk_amount"],
+    draft_row["portfolio_amount"],
+    draft_row["risk_percent"],
+)
+if draft_risk_progress is not None:
+    draft_risk_progress_container = preview_cols[4].container(key="draft-risk-progress")
+    draft_risk_progress_container.progress(
+        draft_risk_progress,
+        width=170,
+    )
 
 feedback_status = "ready"
 if draft_error:
