@@ -1440,8 +1440,7 @@ preview_cols[0].metric("Stop Loss", format_percent(first_value(draft_result, "st
 preview_cols[1].metric("Risk in ATR", format_blank_optional_number(first_value(draft_result, "risk_in_atr")))
 preview_cols[2].metric("Shares", "" if pd.isna(draft_row["number_of_shares"]) else int(draft_row["number_of_shares"]))
 preview_cols[3].metric("Position Size", format_currency(first_value(draft_result, "position_size")))
-draft_risk_percent = percent_of_portfolio(draft_row["risk_amount"], draft_row["portfolio_amount"])
-preview_cols[4].metric("Total Risk", format_currency_percent_pair(draft_row["risk_amount"], draft_risk_percent))
+preview_cols[4].metric("Total Risk", format_position_risk(draft_row["risk_amount"], draft_row["portfolio_amount"]))
 
 feedback_status = "ready"
 if draft_error:
