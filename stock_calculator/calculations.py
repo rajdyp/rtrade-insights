@@ -1102,6 +1102,22 @@ def percent_of_portfolio(amount: Any, portfolio_amount: Any) -> float | None:
     return round((amount_value / portfolio_value) * 100, 2)
 
 
+def risk_budget_progress(risk_amount: Any, portfolio_amount: Any, risk_percent: Any) -> float | None:
+    risk_amount_value = _to_float(risk_amount)
+    portfolio_value = _to_float(portfolio_amount)
+    risk_percent_value = _to_float(risk_percent)
+    values = (risk_amount_value, portfolio_value, risk_percent_value)
+    if any(value is None or not math.isfinite(value) for value in values):
+        return None
+    if risk_amount_value < 0 or portfolio_value <= 0 or risk_percent_value <= 0:
+        return None
+
+    risk_budget = portfolio_value * (risk_percent_value / 100)
+    if not math.isfinite(risk_budget):
+        return None
+    return min(risk_amount_value / risk_budget, 1.0)
+
+
 def symbol_exposure_breaches(
     positions: pd.DataFrame,
     *,
